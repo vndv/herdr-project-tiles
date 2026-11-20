@@ -260,7 +260,7 @@ impl Form {
             x0 + 2,
             y0 + h - 2,
             trunc(
-                "Tab/Shift+Tab поле · ←→ выбор · Enter сохранить · Esc отмена",
+                "Tab/Shift+Tab field · ←→ choose · Enter save · Esc cancel",
                 inner,
             ),
             inner,

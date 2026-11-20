@@ -90,7 +90,7 @@ impl Client {
             let mut buf = String::new();
             let n = r.read_line(&mut buf).map_err(ApiError::io)?;
             if n == 0 {
-                return Err(ApiError::new("closed", "herdr закрыл соединение"));
+                return Err(ApiError::new("closed", "herdr closed the connection"));
             }
             let v: Value = match serde_json::from_str(buf.trim()) {
                 Ok(v) => v,
@@ -168,7 +168,7 @@ impl Subscription {
             let mut buf = String::new();
             let n = self.reader.read_line(&mut buf).map_err(ApiError::io)?;
             if n == 0 {
-                return Err(ApiError::new("closed", "подписка закрыта"));
+                return Err(ApiError::new("closed", "subscription closed"));
             }
             let Ok(v) = serde_json::from_str::<Value>(buf.trim()) else {
                 continue;

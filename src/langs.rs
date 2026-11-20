@@ -79,7 +79,7 @@ const BY_NAME: &[(&str, &str, &str)] = &[
     ("Justfile", "Just", "#384d54"),
 ];
 
-/// Counted only when nothing else is found.
+/// Markup and config, not counted as languages (as in Project Tiles).
 const MARKUP: &[&str] = &["Markdown", "YAML", "TOML", "MDX"];
 
 pub fn language_for(file: &str) -> Option<&'static str> {
@@ -141,16 +141,11 @@ pub fn scan(root: &str, ignore: &HashSet<String>, max_files: usize) -> Vec<(Stri
 }
 
 fn shares(sizes: &HashMap<&'static str, u64>) -> Vec<(String, f64)> {
-    let code: HashMap<_, _> = sizes
+    let use_map: HashMap<_, _> = sizes
         .iter()
         .filter(|(k, _)| !MARKUP.contains(k))
         .map(|(k, v)| (*k, *v))
         .collect();
-    let use_map = if code.values().sum::<u64>() > 0 {
-        &code
-    } else {
-        sizes
-    };
     let total: u64 = use_map.values().sum();
     if total == 0 {
         return Vec::new();
@@ -199,11 +194,11 @@ mod tests {
             s.iter()
                 .all(|(l, _)| l != "Markdown" && l != "JavaScript" && l != "Go")
         );
-        // Only markup → markup counts.
+        // Only markup → no languages.
         let md = dir.join("docs");
         std::fs::create_dir_all(&md).unwrap();
         std::fs::write(md.join("a.md"), "x").unwrap();
-        assert_eq!(scan(&md.to_string_lossy(), &ignore, 10)[0].0, "Markdown");
+        assert!(scan(&md.to_string_lossy(), &ignore, 10).is_empty());
         // File limit.
         assert!(scan(&dir.to_string_lossy(), &ignore, 1).len() <= 1);
         std::fs::remove_dir_all(dir).ok();

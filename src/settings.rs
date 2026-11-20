@@ -144,7 +144,9 @@ impl Paths {
         let state_dir = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| config_dir.join("state"));
+            .unwrap_or_else(|| {
+                Path::new(&home).join(".local/state/herdr/plugins/vndv.project-tiles")
+            });
         Paths {
             config_dir,
             state_dir,

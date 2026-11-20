@@ -105,34 +105,31 @@ enum Focus {
 }
 
 pub const HELP: &[(&str, &str)] = &[
-    ("←↑↓→ hjkl", "навигация"),
-    ("Enter", "открыть (перейти в workspace или создать)"),
-    ("o", "открыть в новом workspace"),
-    ("t", "открыть новой вкладкой в текущем workspace"),
-    ("w", "новый git worktree (workspace herdr)"),
-    ("/", "поиск (имя, путь, описание, языки, ветка)"),
-    ("a", "добавить текущую папку"),
-    ("A", "добавить папку по пути"),
-    ("I", "импорт: открытые workspace + Project Tiles (VS Code)"),
-    ("e", "редактировать проект / коллекцию"),
-    ("d", "убрать проект / коллекцию из списка"),
-    ("m", "переместить в коллекцию"),
-    ("n", "новая коллекция"),
-    ("J / K", "сдвинуть вниз / вверх"),
-    ("Space", "свернуть/развернуть коллекцию"),
+    ("←↑↓→ hjkl", "move"),
+    ("Enter", "open (focus its workspace or create one)"),
+    ("o", "open in a new workspace"),
+    ("t", "open as a new tab in the current workspace"),
+    ("w", "new git worktree (herdr workspace)"),
+    ("/", "search (name, path, description, languages, branch)"),
+    ("a", "add the current folder"),
+    ("A", "add a folder by path"),
+    ("I", "import: open workspaces + Project Tiles (VS Code)"),
+    ("e", "edit project / collection"),
+    ("d", "remove project / collection from the list"),
+    ("m", "move to a collection"),
+    ("n", "new collection"),
+    ("J / K", "move down / up"),
+    ("Space", "collapse/expand a collection"),
     ("f p P", "git fetch / pull --ff-only / push"),
-    ("r / R", "обновить проект / все"),
-    ("O", "показать в Finder"),
+    ("r / R", "refresh project / all"),
+    ("O", "reveal in Finder"),
     ("c", "compact / normal"),
-    ("E", "открыть projects.json в $EDITOR"),
-    (
-        "мышь",
-        "клик — выбрать, двойной — открыть, колесо — листать",
-    ),
-    ("q Esc", "закрыть"),
+    ("E", "edit projects.json in $EDITOR"),
+    ("mouse", "click selects, double-click opens, wheel scrolls"),
+    ("q Esc", "close"),
 ];
 
-const NO_COLLECTION: &str = "— без коллекции —";
+const NO_COLLECTION: &str = "— no collection —";
 
 pub struct App {
     pub env: Env,
@@ -209,7 +206,7 @@ impl App {
             last_width: 0,
         };
         if let Some(e) = &app.store.error {
-            app.msg(&format!("projects.json не читается: {e}"), true);
+            app.msg(&format!("projects.json does not parse: {e}"), true);
         }
         // Start on the project we are in, else on the first one.
         let start = app
@@ -250,7 +247,7 @@ impl App {
 
     fn save(&mut self) {
         if let Err(e) = self.store.save() {
-            self.msg(&format!("не удалось сохранить projects.json: {e}"), true);
+            self.msg(&format!("could not save projects.json: {e}"), true);
         }
         self.recompute_presence();
         self.need_tag = true;
@@ -281,16 +278,16 @@ impl App {
                     .map(|p| p.name.clone())
                     .unwrap_or_default();
                 if ok {
-                    self.msg(&format!("git {}: готово — {name}", op.name()), false);
+                    self.msg(&format!("git {}: done — {name}", op.name()), false);
                 } else {
                     self.msg(
-                        &format!("git {} ошибка — {name}: {message}", op.name()),
+                        &format!("git {} failed — {name}: {message}", op.name()),
                         true,
                     );
                     if let Some(c) = &self.env.client {
                         presence::notify(
                             c,
-                            &format!("git {}: ошибка — {name}", op.name()),
+                            &format!("git {} failed — {name}", op.name()),
                             &message,
                         );
                     }
@@ -318,7 +315,7 @@ impl App {
         }
         if let Some(e) = self.store.error.clone() {
             self.msg(
-                &format!("projects.json не читается, оставлено прежнее: {e}"),
+                &format!("projects.json does not parse, keeping the previous state: {e}"),
                 true,
             );
         }
@@ -356,7 +353,7 @@ impl App {
             .all(|w| hay.contains(w))
     }
 
-    /// (collection id or None for "Без коллекции", project ids) in display order.
+    /// (collection id or None for "No collection", project ids) in display order.
     fn sections(&self) -> Vec<(Option<String>, Vec<String>)> {
         let cat = self.cat();
         let mut out = Vec::new();
@@ -612,12 +609,12 @@ impl App {
             x = p.put(x + 2, 0, &format!("⟳ {busy}"), st(t.yellow), None);
         }
         if self.env.client.is_none() {
-            x = p.put(x + 2, 0, "без herdr", st(t.overlay0), None);
+            x = p.put(x + 2, 0, "no herdr", st(t.overlay0), None);
         } else if self.live_error.is_some() {
-            x = p.put(x + 2, 0, "herdr: нет связи", st(t.red), None);
+            x = p.put(x + 2, 0, "herdr: disconnected", st(t.red), None);
         }
         if let Some(here) = self.env.ctx.here() {
-            let s = format!("здесь: {}", short_path(&here));
+            let s = format!("here: {}", short_path(&here));
             let room = (w as usize / 2).max(10);
             let s = trunc_left(&s, room);
             let sx = w.saturating_sub(width(&s) as u16 + 2).max(x + 2);
@@ -626,7 +623,7 @@ impl App {
         let search = if self.searching || !self.query.is_empty() {
             format!("/ {}{}", self.query, if self.searching { "▏" } else { "" })
         } else {
-            "/ поиск…   ? помощь".to_string()
+            "/ search…   ? help".to_string()
         };
         p.put(
             1,
@@ -653,7 +650,7 @@ impl App {
                     p.put(
                         it.x,
                         y as u16,
-                        "пусто — m на проекте, чтобы перенести сюда",
+                        "empty — press m on a project to move it here",
                         st(t.overlay0),
                         None,
                     );
@@ -677,11 +674,11 @@ impl App {
         }
         if self.cat().projects.is_empty() {
             let lines = [
-                "Пока нет проектов.",
+                "No projects yet.",
                 "",
-                "a — добавить папку текущей панели herdr",
-                "A — добавить папку по пути",
-                "I — импортировать открытые workspace и каталог Project Tiles из VS Code",
+                "a — add the folder of the current herdr pane",
+                "A — add a folder by path",
+                "I — import open workspaces and the VS Code Project Tiles catalog",
             ];
             for (i, l) in lines.iter().enumerate() {
                 p.put(
@@ -703,7 +700,7 @@ impl App {
                 p.put(
                     1,
                     sy,
-                    "Enter открыть · o new ws · t вкладка · a добавить · e правка · / поиск · ? помощь · q выход",
+                    "Enter open · o new ws · t tab · a add · e edit · / search · ? help · q quit",
                     st(t.overlay0),
                     None,
                 );
@@ -725,7 +722,7 @@ impl App {
         let w = p.area.width;
         let (name, color, desc, collapsed) = match self.cat().collection(cid) {
             None => (
-                "Без коллекции".to_string(),
+                "No collection".to_string(),
                 t.overlay0,
                 String::new(),
                 false,
@@ -907,7 +904,7 @@ impl App {
                 Some("offline") => {
                     marks.push(("⊘ offline".into(), Style::default().fg(t.overlay0)))
                 }
-                Some(_) => marks.push(("✗ нет папки".into(), Style::default().fg(t.red))),
+                Some(_) => marks.push(("✗ missing".into(), Style::default().fg(t.red))),
                 None => {
                     if pres.working > 0 {
                         marks.push((format!("●{}", pres.working), Style::default().fg(t.yellow)));
@@ -919,7 +916,7 @@ impl App {
                         marks.push((format!("●{}", pres.done), Style::default().fg(t.teal)));
                     }
                     if here {
-                        marks.push(("● здесь".into(), Style::default().fg(t.teal)));
+                        marks.push(("● here".into(), Style::default().fg(t.teal)));
                     }
                     if !pres.workspaces.is_empty() {
                         let nums: Vec<String> =
@@ -1110,7 +1107,7 @@ impl App {
             }
             KeyCode::Char('a') => match self.env.ctx.here() {
                 Some(h) => self.add_path(&h),
-                None => self.msg("не знаю текущую папку — используй A", true),
+                None => self.msg("no current folder — use A", true),
             },
             KeyCode::Char('A') => {
                 let start = self
@@ -1121,11 +1118,11 @@ impl App {
                     .unwrap_or_else(|| "~/".into());
                 self.modal = Some(Modal::Form(
                     Box::new(Form::new(
-                        "Добавить папку",
+                        "Add folder",
                         vec![Field::text(
-                            "Путь к папке",
+                            "Folder path",
                             &start,
-                            "~ раскрывается; путь нормализуется до корня git",
+                            "~ is expanded; the path is normalized to the git root",
                         )],
                     )),
                     Purpose::AddPath,
@@ -1143,7 +1140,10 @@ impl App {
             KeyCode::Char('d') => {
                 if let Some(p) = p {
                     self.modal = Some(Modal::Confirm(
-                        format!("Убрать «{}» из списка? Папка не трогается.", p.name),
+                        format!(
+                            "Remove \"{}\" from the list? The folder is not touched.",
+                            p.name
+                        ),
                         ConfirmAction::RemoveProject(p.id),
                     ));
                 } else if let Some(Some(cid)) = self.current_header() {
@@ -1153,7 +1153,9 @@ impl App {
                         .map(|c| c.name.clone())
                         .unwrap_or_default();
                     self.modal = Some(Modal::Confirm(
-                        format!("Удалить коллекцию «{name}»? Проекты станут без коллекции."),
+                        format!(
+                            "Delete collection \"{name}\"? Its projects move to no collection."
+                        ),
                         ConfirmAction::RemoveCollection(cid),
                     ));
                 }
@@ -1171,12 +1173,12 @@ impl App {
             KeyCode::Char('r') => {
                 if let Some(p) = p {
                     self.refresh_one(&p, true, None);
-                    self.msg(&format!("обновляю {}…", p.name), false);
+                    self.msg(&format!("refreshing {}…", p.name), false);
                 }
             }
             KeyCode::Char('R') => {
                 self.refresh_all(true, None);
-                self.msg("обновляю все проекты…", false);
+                self.msg("refreshing all projects…", false);
             }
             KeyCode::Char('O') => {
                 if let Some(p) = p {
@@ -1322,12 +1324,12 @@ impl App {
     /// Opens a project: focus its workspace, create one, or add a tab. Exits on success.
     pub fn open(&mut self, p: &Project, mode: OpenMode) {
         if !std::path::Path::new(&p.path).is_dir() {
-            self.msg(&format!("папка недоступна: {}", p.path), true);
+            self.msg(&format!("folder unavailable: {}", p.path), true);
             return;
         }
         let Some(client) = self.env.client.clone() else {
             self.msg(
-                "нет сокета herdr (HERDR_SOCKET_PATH) — панель запущена вне herdr",
+                "no herdr socket (HERDR_SOCKET_PATH) — the panel runs outside herdr",
                 true,
             );
             return;
@@ -1375,14 +1377,14 @@ impl App {
                 }
                 self.quit = true;
             }
-            Err(e) => self.msg(&format!("не удалось открыть: {e}"), true),
+            Err(e) => self.msg(&format!("could not open: {e}"), true),
         }
     }
 
     fn git_op(&mut self, p: Option<Project>, op: RemoteOp) {
         let Some(p) = p else { return };
         if !git::is_repo(&p.path) {
-            self.msg("не git-репозиторий", true);
+            self.msg("not a git repository", true);
             return;
         }
         if !self.git_busy.insert(p.id.clone()) {
@@ -1420,39 +1422,39 @@ impl App {
             .position(|i| i.is_some() && *i == p.collection_id)
             .unwrap_or(0);
         let fields = vec![
-            Field::text("Имя", &p.name, ""),
+            Field::text("Name", &p.name, ""),
             Field::text(
-                "Путь",
+                "Path",
                 &short_path(&p.path),
-                "папка проекта; ~ раскрывается",
+                "project folder; ~ is expanded",
             ),
-            Field::text("Описание", p.description.as_deref().unwrap_or(""), ""),
+            Field::text("Description", p.description.as_deref().unwrap_or(""), ""),
             Field::text(
-                "Цвет",
+                "Colour",
                 p.color.as_deref().unwrap_or(""),
-                "#hex или red orange yellow green teal blue purple gray; пусто — цвет коллекции",
+                "#hex or red orange yellow green teal blue purple gray; empty: the collection's colour",
             ),
             Field::text(
-                "Логотип",
+                "Logo",
                 p.emoji().unwrap_or(""),
-                "до 3 emoji; пусто — инициалы",
+                "up to 3 emoji; empty: initials",
             ),
             Field::text(
-                "Языки",
+                "Languages",
                 &p.manual_languages().join(", "),
-                "через запятую; пусто — определять автоматически",
+                "comma-separated; empty: detect automatically",
             ),
             Field::choice(
-                "Коллекция",
+                "Collection",
                 names,
                 cur,
-                "←→ выбрать; новая коллекция — клавиша n",
+                "←→ to choose; n creates a new collection",
             ),
         ];
         let title = if id.is_some() {
-            format!("Проект: {}", p.name)
+            format!("Project: {}", p.name)
         } else {
-            "Новый проект".to_string()
+            "New project".to_string()
         };
         self.modal = Some(Modal::Form(
             Box::new(Form::new(&title, fields)),
@@ -1470,18 +1472,18 @@ impl App {
             .cloned()
             .unwrap_or_default();
         let fields = vec![
-            Field::text("Имя коллекции", &c.name, ""),
-            Field::text("Описание", c.description.as_deref().unwrap_or(""), ""),
+            Field::text("Collection name", &c.name, ""),
+            Field::text("Description", c.description.as_deref().unwrap_or(""), ""),
             Field::text(
-                "Цвет",
+                "Colour",
                 c.color.as_deref().unwrap_or(""),
-                "#hex или red orange yellow green teal blue purple gray",
+                "#hex or red orange yellow green teal blue purple gray",
             ),
         ];
         let title = if id.is_some() {
-            "Коллекция"
+            "Collection"
         } else {
-            "Новая коллекция"
+            "New collection"
         };
         self.modal = Some(Modal::Form(
             Box::new(Form::new(title, fields)),
@@ -1497,8 +1499,8 @@ impl App {
             .unwrap_or(0);
         self.modal = Some(Modal::Form(
             Box::new(Form::new(
-                &format!("Переместить «{}»", p.name),
-                vec![Field::choice("В коллекцию", names, cur, "←→ выбрать")],
+                &format!("Move \"{}\"", p.name),
+                vec![Field::choice("To collection", names, cur, "←→ to choose")],
             )),
             Purpose::Move { id: p.id.clone() },
         ));
@@ -1506,16 +1508,16 @@ impl App {
 
     fn worktree_form(&mut self, p: &Project) {
         if !git::is_repo(&p.path) {
-            self.msg("не git-репозиторий", true);
+            self.msg("not a git repository", true);
             return;
         }
         self.modal = Some(Modal::Form(
             Box::new(Form::new(
                 &format!("Worktree: {}", p.name),
                 vec![Field::text(
-                    "Ветка",
+                    "Branch",
                     "",
-                    "существующая ветка или новая (от HEAD)",
+                    "an existing branch, or a new one (from HEAD)",
                 )],
             )),
             Purpose::Worktree { id: p.id.clone() },
@@ -1525,20 +1527,15 @@ impl App {
     fn on_modal_key(&mut self, modal: Modal, k: KeyEvent) {
         match modal {
             Modal::Confirm(q, action) => match k.code {
-                KeyCode::Char('y')
-                | KeyCode::Char('Y')
-                | KeyCode::Char('д')
-                | KeyCode::Char('Д') => self.confirm(action),
-                KeyCode::Char('n')
-                | KeyCode::Char('N')
-                | KeyCode::Char('н')
-                | KeyCode::Esc
-                | KeyCode::Enter => self.msg("отменено", false),
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(action),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
+                    self.msg("cancelled", false)
+                }
                 _ => self.modal = Some(Modal::Confirm(q, action)),
             },
             Modal::Form(mut form, purpose) => match form.handle(k) {
                 Outcome::Continue => self.modal = Some(Modal::Form(form, purpose)),
-                Outcome::Cancel => self.msg("отменено", false),
+                Outcome::Cancel => self.msg("cancelled", false),
                 Outcome::Submit => {
                     if let Err(e) = self.submit(&form, &purpose) {
                         form.error = Some(e);
@@ -1560,7 +1557,7 @@ impl App {
                 self.store.data.projects.retain(|p| p.id != id);
                 self.meta.drop_project(&id);
                 self.save();
-                self.msg(&format!("убран: {name}"), false);
+                self.msg(&format!("removed: {name}"), false);
             }
             ConfirmAction::RemoveCollection(cid) => {
                 self.store.data.collections.retain(|c| c.id != cid);
@@ -1570,7 +1567,7 @@ impl App {
                     }
                 }
                 self.save();
-                self.msg("коллекция удалена", false);
+                self.msg("collection deleted", false);
             }
         }
     }
@@ -1580,7 +1577,7 @@ impl App {
             Purpose::AddPath => {
                 let v = f.value(0);
                 if v.trim().is_empty() {
-                    return Err("укажи путь".into());
+                    return Err("enter a path".into());
                 }
                 self.add_path(&v);
                 Ok(())
@@ -1604,7 +1601,7 @@ impl App {
             Purpose::EditCollection { id } => {
                 let name = f.value(0).trim().to_string();
                 if name.is_empty() {
-                    return Err("имя коллекции не может быть пустым".into());
+                    return Err("the collection name cannot be empty".into());
                 }
                 let color = f.value(2);
                 let color = if color.trim().is_empty() {
@@ -1613,14 +1610,14 @@ impl App {
                     Some(
                         self.theme
                             .parse_color(&color)
-                            .ok_or_else(|| format!("не понял цвет «{color}»"))?,
+                            .ok_or_else(|| format!("unknown colour \"{color}\""))?,
                     )
                 };
                 let desc = Some(f.value(1).trim().to_string()).filter(|s| !s.is_empty());
                 if let Some(other) = self.cat().collection_by_name(&name)
                     && Some(&other.id) != id.as_ref()
                 {
-                    return Err(format!("коллекция «{}» уже есть", other.name));
+                    return Err(format!("collection \"{}\" already exists", other.name));
                 }
                 let cid = match id {
                     Some(id) => id.clone(),
@@ -1641,16 +1638,20 @@ impl App {
                 }
                 self.pending = Some(Focus::Header(cid));
                 self.save();
-                self.msg(&format!("коллекция сохранена: {name}"), false);
+                self.msg(&format!("collection saved: {name}"), false);
                 Ok(())
             }
             Purpose::Worktree { id } => {
                 let branch = f.value(0).trim().to_string();
                 if branch.is_empty() {
-                    return Err("укажи ветку".into());
+                    return Err("enter a branch".into());
                 }
-                let p = self.cat().project(id).cloned().ok_or("проект пропал")?;
-                let client = self.env.client.clone().ok_or("нет сокета herdr")?;
+                let p = self
+                    .cat()
+                    .project(id)
+                    .cloned()
+                    .ok_or("the project is gone")?;
+                let client = self.env.client.clone().ok_or("no herdr socket")?;
                 let r = client
                     .request(
                         "worktree.create",
@@ -1686,13 +1687,13 @@ impl App {
                 if (norm(&path) != norm(&p.path) || id.is_none())
                     && !std::path::Path::new(&path).is_dir()
                 {
-                    return Err(format!("нет такой папки: {path}"));
+                    return Err(format!("no such folder: {path}"));
                 }
                 if let Some(i) = self.cat().find_path(&path)
                     && Some(&self.cat().projects[i].id) != id.as_ref()
                 {
                     return Err(format!(
-                        "этот путь уже в проекте «{}»",
+                        "this path is already the project \"{}\"",
                         self.cat().projects[i].name
                     ));
                 }
@@ -1703,7 +1704,7 @@ impl App {
                     Some(
                         self.theme
                             .parse_color(&color)
-                            .ok_or_else(|| format!("не понял цвет «{}»", color.trim()))?,
+                            .ok_or_else(|| format!("unknown colour \"{}\"", color.trim()))?,
                     )
                 };
                 let name = f.value(0).trim().to_string();
@@ -1744,7 +1745,7 @@ impl App {
                 self.pending = Some(Focus::Tile(p.id.clone()));
                 self.save();
                 self.refresh_one(&p, true, Some(false));
-                self.msg(&format!("сохранено: {}", p.name), false);
+                self.msg(&format!("saved: {}", p.name), false);
                 Ok(())
             }
         }
@@ -1755,14 +1756,14 @@ impl App {
         let base = self.env.ctx.here().unwrap_or_else(text::home);
         let path = text::expand_path(raw, &base).to_string_lossy().to_string();
         if !std::path::Path::new(&path).is_dir() {
-            self.msg(&format!("нет такой папки: {path}"), true);
+            self.msg(&format!("no such folder: {path}"), true);
             return;
         }
         let path = git::toplevel(&path);
         if let Some(i) = self.cat().find_path(&path) {
             let p = self.cat().projects[i].clone();
             self.pending = Some(Focus::Tile(p.id.clone()));
-            self.msg(&format!("уже есть: {} — редактирование", p.name), false);
+            self.msg(&format!("already listed: {} — editing", p.name), false);
             let id = p.id.clone();
             self.project_form(Some(id), p);
             return;
@@ -1802,9 +1803,9 @@ impl App {
         let note = if vscode.is_some() {
             ""
         } else {
-            " (каталог Project Tiles из VS Code не найден)"
+            " (VS Code Project Tiles catalog not found)"
         };
-        self.msg(&format!("импортировано: {added}{note}"), false);
+        self.msg(&format!("imported or updated: {added}{note}"), false);
     }
 
     /// Restores the screen after `$EDITOR` and reloads the catalog.
@@ -1814,14 +1815,9 @@ impl App {
     }
 }
 
-/// "1 проект", "3 проекта", "5 проектов".
+/// "1 project", "5 projects".
 pub fn projects_label(n: usize) -> String {
-    let word = match (n % 10, n % 100) {
-        (1, x) if x != 11 => "проект",
-        (2..=4, x) if !(12..=14).contains(&x) => "проекта",
-        _ => "проектов",
-    };
-    format!("{n} {word}")
+    format!("{n} project{}", if n == 1 { "" } else { "s" })
 }
 
 fn workspace_id_of(r: &Value) -> Option<String> {
@@ -1845,10 +1841,15 @@ pub fn import_into(
     if let Some(src) = vscode {
         let mut idmap: HashMap<String, String> = HashMap::new();
         for c in &src.collections {
+            let existed = cat.collection_by_name(&c.name).is_some();
             if let Some(mine) =
                 cat.ensure_collection(&c.name, |n| c.color.clone().unwrap_or_else(|| pick(n)))
             {
                 if let Some(m) = cat.collection_mut(&mine) {
+                    // A new collection keeps the source's colour, or none (like Project Tiles).
+                    if !existed {
+                        m.color = c.color.clone();
+                    }
                     if m.description.is_none() {
                         m.description = c.description.clone();
                     }
@@ -1860,9 +1861,19 @@ pub fn import_into(
             }
         }
         for sp in &src.projects {
-            if sp.path.to_lowercase().ends_with(".code-workspace")
-                || cat.find_path(&sp.path).is_some()
-            {
+            if sp.path.to_lowercase().ends_with(".code-workspace") {
+                continue;
+            }
+            if let Some(i) = cat.find_path(&sp.path) {
+                // Already listed: only adopt its VS Code collection when it has none here.
+                let target = sp
+                    .collection_id
+                    .as_ref()
+                    .and_then(|c| idmap.get(c).cloned());
+                if target.is_some() && !cat.is_grouped(&cat.projects[i]) {
+                    cat.projects[i].collection_id = target;
+                    added += 1;
+                }
                 continue;
             }
             let mut p = Project::new(&sp.path);
@@ -1981,7 +1992,7 @@ fn draw_legend(
             p.put(
                 x,
                 y,
-                "языки не найдены",
+                "no languages found",
                 Style::default().fg(t.overlay0),
                 None,
             );
@@ -2016,7 +2027,7 @@ fn draw_git1(p: &mut Painter, x: u16, y: u16, w: usize, m: &Meta, busy: bool, t:
         p.put(
             x,
             y,
-            "не git-репозиторий",
+            "not a git repository",
             Style::default().fg(t.overlay0),
             None,
         );
@@ -2143,7 +2154,7 @@ fn boxed(buf: &mut Buffer, area: Rect, bw: u16, bh: u16, t: &Theme, title: &str)
 }
 
 fn draw_help(buf: &mut Buffer, area: Rect, t: &Theme) {
-    let r = boxed(buf, area, 70, HELP.len() as u16 + 4, t, "Клавиши");
+    let r = boxed(buf, area, 70, HELP.len() as u16 + 4, t, "Keys");
     let inner = r.width.saturating_sub(17) as usize;
     for (i, (k, d)) in HELP.iter().enumerate() {
         let y = r.y + 2 + i as u16;
@@ -2169,7 +2180,7 @@ fn draw_help(buf: &mut Buffer, area: Rect, t: &Theme) {
 
 fn draw_confirm(buf: &mut Buffer, area: Rect, t: &Theme, q: &str) {
     let w = (width(q) as u16 + 6).clamp(30, area.width.saturating_sub(2).max(30));
-    let r = boxed(buf, area, w, 5, t, "Подтверждение");
+    let r = boxed(buf, area, w, 5, t, "Confirm");
     let inner = r.width.saturating_sub(4) as usize;
     buf.set_stringn(
         r.x + 2,
@@ -2181,7 +2192,7 @@ fn draw_confirm(buf: &mut Buffer, area: Rect, t: &Theme, q: &str) {
     buf.set_stringn(
         r.x + 2,
         r.y + 3,
-        "y — да · n / Esc — нет",
+        "y — yes · n / Esc — no",
         inner,
         Style::default().fg(t.overlay0).bg(t.panel_bg),
     );
@@ -2192,12 +2203,8 @@ mod plural_tests {
     #[test]
     fn plural() {
         let l = super::projects_label;
-        assert_eq!(l(1), "1 проект");
-        assert_eq!(l(3), "3 проекта");
-        assert_eq!(l(5), "5 проектов");
-        assert_eq!(l(11), "11 проектов");
-        assert_eq!(l(12), "12 проектов");
-        assert_eq!(l(21), "21 проект");
-        assert_eq!(l(0), "0 проектов");
+        assert_eq!(l(1), "1 project");
+        assert_eq!(l(5), "5 projects");
+        assert_eq!(l(0), "0 projects");
     }
 }

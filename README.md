@@ -9,13 +9,33 @@ Each tile shows the name, a logo (emoji or initials), the path, a description, a
 the git branch, ahead/behind (grey "stale" until a fresh fetch), changed/untracked counts and
 the last commit. Live from herdr (event subscriptions, no polling):
 
-- `● здесь` — the project you are in; `◆ 1,3` — workspaces the project is open in;
+- `● here` — the project you are in; `◆ 1,3` — workspaces the project is open in;
 - agent counts in the project: `●N` working (yellow), blocked (red), done (teal);
 - offline (`/Volumes/...` not mounted: dim, dashed) and deleted folders (red).
 
 Projects can be grouped into collapsible coloured collections, reordered and searched.
 
-## Install
+## Herdr.app (desktop) mod
+
+The desktop Herdr.app does not load TUI plugins; it has its own mods. `mod/project-tiles/` is the
+same dashboard as a Herdr.app mod (GPUI), opened as a dialog with `cmd-alt-p`
+(`"cmd-alt-p": "mod.open:project-tiles"` in `~/.config/herdr-app/keys.json`). It shares the
+catalog, settings and cache with the TUI plugin and uses this binary as its backend
+(`project-tiles app paths | meta | git | resolve | import`, JSON on stdout), so build first:
+
+    cargo build --release --locked
+    mkdir -p ~/.config/herdr-app/mods/project-tiles
+    cp mod/project-tiles/{main.js,model.js,mod.json} ~/.config/herdr-app/mods/project-tiles/
+    herdr-app check ~/.config/herdr-app/mods/project-tiles
+    node mod/test.mjs   # tests for the mod's pure logic
+
+The mod runs programs: this binary (git read-only and fetch/pull/push in project folders) and
+`open` for Reveal in Finder. Enter selects the space showing the project (`space.select`) or
+creates one (`space.new {folder, name}`); `t` is `tab.new`, `w` opens Herdr's worktree dialog.
+Marks are live from `spaces()`/`panes()`: `◆ N` spaces showing the project, `● here`, agents
+working/blocked/done. Git errors are Herdr toasts (`notify`).
+
+## Install (herdr TUI plugin)
 
     cargo build --release --locked
     herdr plugin link ~/Documents/programming/herdr-project-tiles

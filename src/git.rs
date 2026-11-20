@@ -245,7 +245,7 @@ pub fn info(path: &str, fetch: bool) -> Option<GitInfo> {
         g.branch = if o.ok() {
             format!("({})", o.stdout.trim())
         } else {
-            "(нет коммитов)".into()
+            "(no commits)".into()
         };
         g.detached = true;
     }

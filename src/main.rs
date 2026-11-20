@@ -4,8 +4,10 @@
 //! project-tiles open         action `open`: opens the pane through the socket
 //! project-tiles add-current  action `add-current`: adds the focused folder, shows a toast
 //! project-tiles tag          startup / `workspace.created` hook: Spaces sidebar tokens
+//! project-tiles app …        JSON backend for the Herdr.app mod
 
 mod api;
+mod app;
 mod catalog;
 mod form;
 mod git;
@@ -42,12 +44,25 @@ fn main() -> ExitCode {
         "open" => cmd_open(),
         "add-current" => cmd_add_current(),
         "tag" => cmd_tag(),
+        "app" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match app::run(&rest) {
+                Ok(v) => {
+                    println!("{v}");
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("{}", serde_json::json!({ "error": e }));
+                    Err(e)
+                }
+            }
+        }
         "--version" | "version" => {
             println!("project-tiles {VERSION}");
             Ok(())
         }
         _ => Err(format!(
-            "unknown command `{cmd}`; use tui | open | add-current | tag"
+            "unknown command `{cmd}`; use tui | open | add-current | tag | app"
         )),
     };
     match r {
@@ -76,7 +91,7 @@ fn cmd_open() -> Result<(), String> {
     ) {
         Ok(_) => Ok(()),
         Err(e) => {
-            presence::notify(&c, "Project Tiles: не открылась", &e.to_string());
+            presence::notify(&c, "Project Tiles: could not open", &e.to_string());
             Err(e.to_string())
         }
     }
@@ -107,7 +122,7 @@ fn cmd_add_current() -> Result<(), String> {
     let c = Client::from_env();
     let (title, body) = match store.data.find_path(&root) {
         Some(i) => (
-            "Project Tiles: уже в списке",
+            "Project Tiles: already listed",
             store.data.projects[i].name.clone(),
         ),
         None => {
@@ -116,7 +131,7 @@ fn cmd_add_current() -> Result<(), String> {
             store.data.projects.push(p);
             store.save().map_err(|e| e.to_string())?;
             (
-                "Project Tiles: добавлен",
+                "Project Tiles: added",
                 format!("{name} — {}", text::short_path(&root)),
             )
         }
@@ -279,7 +294,7 @@ fn run_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut ui::App) {
     *terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     if let Err(e) = status {
-        app.status = Some((format!("не удалось запустить {editor}: {e}"), true));
+        app.status = Some((format!("could not start {editor}: {e}"), true));
     }
     app.after_editor();
 }

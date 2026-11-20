@@ -1,14 +1,14 @@
- ▦ Project Tiles  0 проектов  без herdr
- / поиск…   ? помощь
+ ▦ Project Tiles  0 projects  no herdr
+ / search…   ? help
 ──────────────────────────────────────────────────────────────────────────────────────────
 
-          Пока нет проектов.
+          No projects yet.
 
-          a — добавить папку текущей панели herdr
-          A — добавить папку по пути
-          I — импортировать открытые workspace и каталог Project Tiles из VS Code
-
-
+          a — add the folder of the current herdr pane
+          A — add a folder by path
+          I — import open workspaces and the VS Code Project Tiles catalog
 
 
- Enter открыть · o new ws · t вкладка · a добавить · e правка · / поиск · ? помощь · q вы…
+
+
+ Enter open · o new ws · t tab · a add · e edit · / search · ? help · q quit

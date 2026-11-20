@@ -50,9 +50,9 @@ fn sample_catalog() -> CatalogData {
         ..Default::default()
     });
     let mut a = project("a", "shop-backend", "/srv/work/shop-backend");
-    a.description = Some("REST API магазина".into());
+    a.description = Some("shop REST API".into());
     a.collection_id = Some("work".into());
-    let mut b = project("b", "Крабы", "/srv/work/crabs");
+    let mut b = project("b", "Crabs", "/srv/work/crabs");
     b.logo = Some(Logo {
         kind: "emoji".into(),
         value: Some("🦀".into()),
@@ -283,10 +283,10 @@ fn render_normal() {
     fx.app.on_msg(Msg::Snapshot(Box::new(sample_snapshot())));
     let s = render(&mut fx.app, 120, 40);
     assert!(s.contains("▦ Project Tiles"));
-    assert!(s.contains("● здесь"));
+    assert!(s.contains("● here"));
     assert!(s.contains("◆ 1"));
     assert!(s.contains("⊘ offline"));
-    assert!(s.contains("✗ нет папки"));
+    assert!(s.contains("✗ missing"));
     assert!(s.contains("a1b2c3d fix: retry on 429 · 2 days"));
     assert!(s.contains("stale"));
     assert!(s.contains("▸ ● Archive (1)"));
@@ -323,7 +323,7 @@ fn render_empty_help_and_form() {
         None,
     );
     let s = render(&mut fx.app, 90, 14);
-    assert!(s.contains("Пока нет проектов."));
+    assert!(s.contains("No projects yet."));
     snapshot("empty", &s);
     std::fs::remove_dir_all(fx.dir).ok();
 
@@ -331,13 +331,13 @@ fn render_empty_help_and_form() {
     render(&mut fx.app, 100, 32);
     fx.app.on_key(key(KeyCode::Char('?')));
     let s = render(&mut fx.app, 100, 32);
-    assert!(s.contains("Клавиши"));
+    assert!(s.contains("Keys"));
     snapshot("help", &s);
     fx.app.on_key(key(KeyCode::Char('x'))); // any key closes help
     select(&mut fx.app, "a");
     fx.app.on_key(key(KeyCode::Char('e')));
     let s = render(&mut fx.app, 100, 32);
-    assert!(s.contains("Проект: shop-backend"));
+    assert!(s.contains("Project: shop-backend"));
     assert!(s.contains("◂ Work ▸"));
     snapshot("form", &s);
     std::fs::remove_dir_all(fx.dir).ok();
@@ -364,7 +364,7 @@ fn form_saves_and_validates() {
     }
     fx.app.on_key(key(KeyCode::Enter));
     let s = render(&mut fx.app, 120, 40);
-    assert!(s.contains("не понял цвет «zzz»"), "{s}");
+    assert!(s.contains("unknown colour \"zzz\""), "{s}");
     fx.app
         .on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     for c in "teal".chars() {
@@ -429,7 +429,7 @@ fn navigation_and_reorder() {
     assert_eq!(fx.app.items[fx.app.sel].kind, ItemKind::Tile("a".into()));
     // Search narrows and hides empty collections.
     fx.app.on_key(key(KeyCode::Char('/')));
-    for c in "крабы".chars() {
+    for c in "crabs".chars() {
         fx.app.on_key(key(KeyCode::Char(c)));
     }
     fx.app.on_key(key(KeyCode::Enter));
@@ -480,12 +480,23 @@ fn import_merges_vscode_and_panes() {
     assert_eq!(n, 3); // x, z, repo
     assert_eq!(cat.collections.len(), 2);
     assert_eq!(cat.collections[0].color.as_deref(), Some("#ff0000"));
+    // A new collection without a colour in the source stays without one.
+    assert_eq!(cat.collections[1].name, "Fun");
+    assert_eq!(cat.collections[1].color, None);
     let x = &cat.projects[cat.find_path("/a/x").unwrap()];
     assert_eq!(x.emoji(), Some("🎮"));
     assert_eq!(x.collection_id.as_deref(), Some("mine"));
     let z = &cat.projects[cat.find_path("/a/z").unwrap()];
     assert_eq!(z.logo.as_ref().unwrap().kind, "auto");
     assert!(cat.find_path(&repo.to_string_lossy()).is_some());
+    // A project already listed without a collection adopts its VS Code collection.
+    let i = cat.find_path("/a/x").unwrap();
+    cat.projects[i].collection_id = None;
+    assert_eq!(
+        ui::import_into(&mut cat, Some(&src), &cwds, &h, &|_| "#000000".into(), &top),
+        1
+    );
+    assert_eq!(cat.projects[i].collection_id.as_deref(), Some("mine"));
     // Again: nothing new.
     assert_eq!(
         ui::import_into(&mut cat, Some(&src), &cwds, &h, &|_| "#000000".into(), &top),
@@ -699,7 +710,7 @@ fn open_without_folder_or_socket_reports_error() {
             .as_ref()
             .unwrap()
             .0
-            .contains("папка недоступна")
+            .contains("folder unavailable")
     );
     std::fs::remove_dir_all(fx.dir).ok();
 }
