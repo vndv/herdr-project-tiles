@@ -67,6 +67,9 @@ export function expandPath(p, home) {
 export function norm(p) {
   let s = (p ?? "").replace(/\/+$/, "");
   if (!s) s = "/";
+  // Herdr.app runs on macOS: case-insensitive by default, and /tmp, /var, /etc are symlinks
+  // into /private (git reports one form, a shell cwd the other).
+  s = s.replace(/^\/private(?=\/(?:tmp|var|etc)(?:\/|$))/, "");
   return s.toLowerCase();
 }
 
@@ -293,6 +296,11 @@ export function projectForCwd(cat, cwd, extra = {}) {
 }
 
 /** {projectId: [linked worktree paths]} from the metadata. */
+/** Metadata belongs to the project's current folder (an old cache entry has no path). */
+export function metaFits(m, p) {
+  return Boolean(m) && (!m.path || norm(m.path) === norm(p.path));
+}
+
 export function worktreeRoots(meta) {
   const out = {};
   for (const [id, m] of Object.entries(meta ?? {})) if (m?.git?.worktrees?.length) out[id] = m.git.worktrees;

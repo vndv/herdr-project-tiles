@@ -56,8 +56,8 @@ fn lifecycle_loop(client: Client, inv: Sender<()>) {
                         return;
                     }
                 }
-                // events_lost or closed: the cache is stale, resubscribe and reread.
-                let _ = inv.send(());
+                // events_lost or closed: the cache is stale. Resubscribe first; the ack above
+                // triggers the reread, so no snapshot is taken before the new subscription.
             }
             Err(_) => {
                 let _ = inv.send(());
@@ -112,6 +112,11 @@ fn agent_manager(client: Client, panes: Receiver<Vec<String>>, inv: Sender<()>) 
             Ok(mut sub) => {
                 let alive = Arc::new(AtomicBool::new(true));
                 current = Some((set, sub.closer(), alive.clone()));
+                // Acked: reread, so a status change between the snapshot and now is not missed.
+                // (The pane set is unchanged then, so this does not resubscribe again.)
+                if inv.send(()).is_err() {
+                    return;
+                }
                 let inv = inv.clone();
                 std::thread::spawn(move || {
                     while sub.next_event().is_ok() {

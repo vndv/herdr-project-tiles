@@ -356,33 +356,65 @@ pub fn remote(path: &str, op: RemoteOp) -> Output {
 /// `https://user@host/group/repo.git` → `https://host/group/repo`. `None` for local paths.
 pub fn web_url(remote: &str) -> Option<String> {
     let r = remote.trim();
-    let (host, path) = if let Some(rest) = r
+    if r.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    // Userinfo is only stripped from the authority (before the first `/`), never from the path.
+    let (host, port, path) = if let Some(rest) = r
         .strip_prefix("https://")
         .or_else(|| r.strip_prefix("http://"))
     {
-        let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
-        rest.split_once('/')?
+        let (auth, path) = rest.split_once('/')?;
+        let hp = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+        let (host, port) = hp.split_once(':').unwrap_or((hp, ""));
+        (host, port, path)
     } else if let Some(rest) = r
         .strip_prefix("ssh://")
         .or_else(|| r.strip_prefix("git+ssh://"))
     {
-        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
-        let (hostport, path) = rest.split_once('/')?;
-        (hostport.split(':').next().unwrap_or(hostport), path)
-    } else if !r.contains("://") && r.contains(':') && !r.starts_with('/') {
-        let rest = r.split_once('@').map(|(_, h)| h).unwrap_or(r);
-        rest.split_once(':')?
+        let (auth, path) = rest.split_once('/')?;
+        let hp = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+        // The ssh port is not the web port.
+        (hp.split(':').next().unwrap_or(hp), "", path)
+    } else if !r.contains("://") {
+        // scp-like `[user@]host:path`; git treats it as a local path when a `/` comes first.
+        let (hp, path) = r.split_once(':')?;
+        if hp.contains('/') {
+            return None;
+        }
+        (hp.rsplit_once('@').map_or(hp, |(_, h)| h), "", path)
     } else {
         return None;
     };
+    let host_ok = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && !host.starts_with(['.', '-'])
+        // A web host has a dot; a bare name is an ssh alias (`~/.ssh/config`), not a site.
+        && host.contains('.');
+    if !host_ok || !port.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
     let path = path
         .trim_matches('/')
         .trim_end_matches(".git")
         .trim_matches('/');
-    if host.is_empty() || path.is_empty() {
+    let segs: Vec<&str> = path.split('/').collect();
+    if path.is_empty() || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
         return None;
     }
-    Some(format!("https://{host}/{path}"))
+    let port = if port.is_empty() {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    let path = segs
+        .iter()
+        .map(|s| encode_path(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("https://{host}{port}/{path}"))
 }
 
 fn encode_path(s: &str) -> String {
@@ -486,6 +518,37 @@ mod tests {
         );
         assert_eq!(web_url("/srv/git/repo.git"), None);
         assert_eq!(web_url("file:///srv/repo"), None);
+        // `@` in the path does not move the host.
+        assert_eq!(
+            web_url("https://github.com/owner/repo@evil.example/x.git").as_deref(),
+            Some("https://github.com/owner/repo%40evil.example/x")
+        );
+        assert_eq!(
+            web_url("https://git.example.com:8443/a/b.git").as_deref(),
+            Some("https://git.example.com:8443/a/b")
+        );
+        for bad in [
+            "javascript:alert(1)",
+            "https://h/a/../b",
+            "https://h/a b",
+            "https:///a",
+            "https://-h/a",
+            "https://h:x/a",
+            "https://h\u{7}/a",
+            "./rel/path:x",
+            "git@h:",
+            "github-personal:o/r.git",
+        ] {
+            assert_eq!(web_url(bad), None, "{bad}");
+        }
+        assert_eq!(
+            web_url("https://10.0.0.5/a/b").as_deref(),
+            Some("https://10.0.0.5/a/b")
+        );
+        assert_eq!(
+            web_url("git@h.example:grp/проект.git").as_deref(),
+            Some("https://h.example/grp/%D0%BF%D1%80%D0%BE%D0%B5%D0%BA%D1%82")
+        );
         let mut g = GitInfo {
             branch: "feat/TASK-1 x".into(),
             upstream: Some("origin/feat/TASK-1 x".into()),

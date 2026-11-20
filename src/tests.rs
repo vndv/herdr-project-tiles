@@ -315,6 +315,29 @@ fn render_compact_and_narrow() {
 }
 
 #[test]
+fn modals_survive_tiny_terminals() {
+    let sizes = [
+        (1, 1),
+        (5, 2),
+        (19, 24),
+        (80, 2),
+        (80, 6),
+        (30, 8),
+        (100, 32),
+    ];
+    for k in ['?', 'e', 'd', 'n'] {
+        let mut fx = fixture(sample_catalog(), InvocationContext::default(), None, None);
+        render(&mut fx.app, 100, 32);
+        select(&mut fx.app, "a");
+        fx.app.on_key(key(KeyCode::Char(k)));
+        for (w, h) in sizes {
+            render(&mut fx.app, w, h);
+        }
+        std::fs::remove_dir_all(fx.dir).ok();
+    }
+}
+
+#[test]
 fn render_empty_help_and_form() {
     let mut fx = fixture(
         CatalogData::default(),
@@ -746,7 +769,7 @@ fn tag_reports_only_changes_and_clears_stale() {
         ..Default::default()
     };
     let n = crate::presence::tag_all(&fake.client(), &cat, &snap, &|_| Some(meta.clone()), None);
-    assert_eq!(n, 3);
+    assert_eq!((n.sent, n.error), (3, None));
     let reps = fake.find("workspace.report_metadata");
     let by_ws = |w: &str| {
         reps.iter()
@@ -809,21 +832,38 @@ fn events_lost_resubscribes_and_rereads_snapshot() {
             }
         }),
     );
+    // Index of the nth subscribe of a kind in the request log.
+    let nth_sub = |kind: &str, n: usize| {
+        let log = fake.log.lock().unwrap();
+        log.iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r["method"] == "events.subscribe" && r["params"]["subscriptions"][0]["type"] == kind
+            })
+            .nth(n)
+            .map(|(i, _)| i)
+    };
+    let snapshot_after = |i: Option<usize>| {
+        i.is_some_and(|i| fake.methods()[i..].iter().any(|x| x == "session.snapshot"))
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let mut snapshots = 0;
     while std::time::Instant::now() < deadline {
         if rx.recv_timeout(Duration::from_millis(100)).is_ok() {
             snapshots += 1;
         }
-        let lifecycle_subs = fake
-            .find("events.subscribe")
-            .iter()
-            .filter(|r| r["params"]["subscriptions"][0]["type"] == "workspace.created")
-            .count();
-        if lifecycle_subs >= 2 && snapshots >= 2 {
+        if snapshot_after(nth_sub("workspace.created", 1))
+            && snapshot_after(nth_sub("pane.agent_status_changed", 0))
+        {
             break;
         }
     }
+    // The agent subscription's ack is followed by a reread.
+    assert!(
+        snapshot_after(nth_sub("pane.agent_status_changed", 0)),
+        "{:?}",
+        fake.methods()
+    );
     let subs = fake.find("events.subscribe");
     let lifecycle: Vec<_> = subs
         .iter()

@@ -87,10 +87,18 @@ export default class ProjectTiles extends View {
     });
     // The catalog can change on disk (hand edit, the TUI plugin, `E`).
     cx.timer.every(2000, (cx) => cx.spawn(async (cx) => {
-      if (!(await this.reloadCatalog())) return;
-      cx.notify();
-      const missing = this.cat.projects.filter((p) => !this.meta[p.id]).map((p) => p.id);
-      if (missing.length) await this.loadMeta(cx, this.settings.fetch_remote ? ["--fetch"] : [], missing);
+      const fetch = this.settings.fetch_remote ? ["--fetch"] : [];
+      if (await this.reloadCatalog()) {
+        // New projects, or a path changed elsewhere (TUI, editor): the old folder's metadata
+        // (branch, links, availability) does not apply any more.
+        const stale = this.cat.projects.filter((p) => !M.metaFits(this.meta[p.id], p)).map((p) => p.id);
+        stale.forEach((id) => delete this.meta[id]);
+        cx.notify();
+        if (stale.length) await this.loadMeta(cx, fetch, stale);
+      } else if (!this.loading && this.metaAt && Date.now() - this.metaAt > this.settings.metadata_cache_minutes * 60000) {
+        // The dashboard stays open: refresh what went past its TTL (the backend decides what).
+        await this.loadMeta(cx, fetch);
+      }
     }));
   }
 
@@ -148,7 +156,12 @@ export default class ProjectTiles extends View {
     cx.notify();
     try {
       const r = await this.backend(["meta", ...args, ...idArgs], 300000);
-      Object.assign(this.meta, r.projects ?? {});
+      // A late answer for a project whose path changed meanwhile is dropped.
+      for (const [id, m] of Object.entries(r.projects ?? {})) {
+        const p = this.project(id);
+        if (p && M.metaFits(m, p)) this.meta[id] = m;
+      }
+      if (!ids && !args.includes("--cached")) this.metaAt = Date.now();
     } catch (e) {
       this.say(`git/languages: ${e.message}`, true);
     }
@@ -744,14 +757,15 @@ export default class ProjectTiles extends View {
     return svg(`mods/project-tiles/icons/${name}.svg`).size(size).flex_none().text_color(color);
   }
 
-  /** A footer/header button: primary (accent fill) or secondary (raised). */
+  /** A footer/header button: primary (accent fill) or secondary (raised). Its clicks stop here,
+   *  so a double click does not also reach the tile (which opens the project). */
   button(t, id, icon, label, primary, onClick) {
     return h_flex().id(id).flex_none().h(26).px(label ? 9 : 7).gap(5).items_center().rounded(6).cursor_pointer()
       .bg(primary ? t.accent : t.raised)
       .text_color(primary ? t.accent_foreground : t.foreground)
       .hover((s) => s.opacity(0.85))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => onClick(cx))
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
       .when(Boolean(icon), (el) => el.child(this.icon(icon, 13, primary ? t.accent_foreground : t.muted)))
       .when(Boolean(label), (el) => el.child(div().text_size(12).font_medium().whitespace_nowrap().child(label)));
   }
@@ -760,7 +774,7 @@ export default class ProjectTiles extends View {
     return h_flex().id(id).flex_none().h(24).px(5).gap(3).items_center().rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => onClick(cx))
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
       .child(this.icon(icon, 13, color))
       .when(Boolean(label), (el) => el.child(div().text_size(11.5).font_medium().text_color(color).child(label)));
   }
@@ -779,7 +793,12 @@ export default class ProjectTiles extends View {
     if (this.at === null) this.at = 0;
     this.at = Math.min(this.at, Math.max(0, d.items.length - 1));
     const cur = this.current(d.items);
-    this.scroll.scroll_to_item(cur ? cur.row : 0);
+    // Bring the selection into view only when it moves; live updates keep a manual scroll.
+    const key = `${this.at}:${cur?.row ?? 0}:${d.items.length}`;
+    if (key !== this.scrolledFor) {
+      this.scrolledFor = key;
+      this.scroll.scroll_to_item(cur ? cur.row : 0);
+    }
 
     const search = h_flex().id("pt-search").w(300).flex_shrink(1).min_w(140).h(28).px(9).gap(7).items_center().rounded(6)
       .bg(t.raised).border_1().border_color(this.search ? t.accent : t.raised).cursor_text()

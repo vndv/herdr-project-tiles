@@ -8,12 +8,35 @@ use crate::text::{norm, within};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
-/// The catalog project a cwd belongs to (the deepest project path that contains it).
-pub fn project_for_cwd<'a>(cat: &'a CatalogData, cwd: &str) -> Option<&'a Project> {
+/// Extra roots per project id: its linked git worktrees, which usually live outside the
+/// project folder (`~/.herdr/worktrees/...`).
+pub type Roots = HashMap<String, Vec<String>>;
+
+/// Worktree roots from the metadata cache (no git call).
+pub fn worktree_roots(cat: &CatalogData, meta: &dyn Fn(&Project) -> Option<Meta>) -> Roots {
     cat.projects
         .iter()
-        .filter(|p| within(cwd, &p.path))
-        .max_by_key(|p| norm(&p.path).len())
+        .filter_map(|p| {
+            let wt = meta(p)?.git?.worktrees;
+            (!wt.is_empty()).then(|| (p.id.clone(), wt))
+        })
+        .collect()
+}
+
+/// The catalog project a cwd belongs to: the deepest project path or worktree root that
+/// contains it. A worktree registered as its own project is deeper or equal, and wins by order.
+pub fn project_for_cwd<'a>(cat: &'a CatalogData, cwd: &str, roots: &Roots) -> Option<&'a Project> {
+    let mut best: Option<(&Project, usize)> = None;
+    for p in &cat.projects {
+        let extra = roots.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        for root in std::iter::once(&p.path).chain(extra) {
+            let d = norm(root).len();
+            if within(cwd, root) && best.is_none_or(|(_, bd)| d > bd) {
+                best = Some((p, d));
+            }
+        }
+    }
+    best.map(|(p, _)| p)
 }
 
 /// Project id per workspace. Our own `pt_id` token wins while a pane is still inside that
@@ -22,6 +45,7 @@ pub fn workspace_projects(
     cat: &CatalogData,
     snap: &SessionSnapshot,
     skip_pane: Option<&str>,
+    roots: &Roots,
 ) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for ws in &snap.workspaces {
@@ -36,7 +60,7 @@ pub fn workspace_projects(
             }
             let mut seen: Vec<&str> = Vec::new();
             for cwd in pane.cwds() {
-                if let Some(p) = project_for_cwd(cat, cwd)
+                if let Some(p) = project_for_cwd(cat, cwd, roots)
                     && !seen.contains(&p.id.as_str())
                 {
                     seen.push(&p.id);
@@ -76,6 +100,7 @@ pub fn presence(
     cat: &CatalogData,
     snap: &SessionSnapshot,
     skip_pane: Option<&str>,
+    roots: &Roots,
 ) -> HashMap<String, Presence> {
     let mut out: HashMap<String, Presence> = HashMap::new();
     let ws_by_id: HashMap<&str, &WorkspaceInfo> = snap
@@ -83,7 +108,7 @@ pub fn presence(
         .iter()
         .map(|w| (w.workspace_id.as_str(), w))
         .collect();
-    for (ws_id, pid) in workspace_projects(cat, snap, skip_pane) {
+    for (ws_id, pid) in workspace_projects(cat, snap, skip_pane, roots) {
         if let Some(ws) = ws_by_id.get(ws_id.as_str()) {
             out.entry(pid)
                 .or_default()
@@ -95,7 +120,7 @@ pub fn presence(
         if Some(pane.pane_id.as_str()) == skip_pane {
             continue;
         }
-        let Some(p) = pane.cwds().find_map(|c| project_for_cwd(cat, c)) else {
+        let Some(p) = pane.cwds().find_map(|c| project_for_cwd(cat, c, roots)) else {
             continue;
         };
         let e = out.entry(p.id.clone()).or_default();
@@ -135,18 +160,43 @@ pub fn git_token(m: &Meta) -> Option<String> {
     })
 }
 
+/// Token values are limited to 80; counted in bytes to be safe whatever unit the server uses.
+pub const TOKEN_MAX: usize = 80;
+
+/// Cuts a display value to `TOKEN_MAX` bytes at a grapheme boundary, with an ellipsis.
+pub fn token_value(s: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if s.len() <= TOKEN_MAX {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for g in s.graphemes(true) {
+        if out.len() + g.len() + '…'.len_utf8() > TOKEN_MAX {
+            break;
+        }
+        out.push_str(g);
+    }
+    out.push('…');
+    out
+}
+
 pub fn tokens_for(p: &Project, m: Option<&Meta>) -> BTreeMap<String, Option<String>> {
     let mut t = BTreeMap::new();
-    t.insert("pt_id".into(), Some(p.id.clone()));
+    // An id is matched exactly, so a too-long one is not cut but left out (cwd matching remains).
+    t.insert(
+        "pt_id".into(),
+        (p.id.len() <= TOKEN_MAX).then(|| p.id.clone()),
+    );
     t.insert(
         "pt_project".into(),
-        Some(format!("{} {}", p.badge(), p.name)),
+        Some(token_value(&format!("{} {}", p.badge(), p.name))),
     );
     t.insert("pt_git".into(), m.and_then(git_token));
     t.insert(
         "pt_langs".into(),
         m.and_then(|m| m.languages.first().map(|l| l.0.clone()))
-            .or_else(|| p.manual_languages().first().cloned()),
+            .or_else(|| p.manual_languages().first().cloned())
+            .map(|l| token_value(&l)),
     );
     t
 }
@@ -199,9 +249,9 @@ pub fn tag_all(
     snap: &SessionSnapshot,
     meta: &dyn Fn(&Project) -> Option<Meta>,
     skip_pane: Option<&str>,
-) -> usize {
-    let map = workspace_projects(cat, snap, skip_pane);
-    let mut sent = 0;
+) -> Tagged {
+    let map = workspace_projects(cat, snap, skip_pane, &worktree_roots(cat, meta));
+    let (mut sent, mut error) = (0, None);
     for ws in &snap.workspaces {
         let want = match map.get(&ws.workspace_id).and_then(|id| cat.project(id)) {
             Some(p) => tokens_for(p, meta(p).as_ref()),
@@ -209,11 +259,22 @@ pub fn tag_all(
             None => continue,
         };
         let d = diff(ws, &want);
-        if !d.is_empty() && report(client, &ws.workspace_id, &d).is_ok() {
-            sent += 1;
+        if d.is_empty() {
+            continue;
+        }
+        match report(client, &ws.workspace_id, &d) {
+            Ok(()) => sent += 1,
+            Err(e) => error = Some(format!("{}: {e}", ws.workspace_id)),
         }
     }
-    sent
+    Tagged { sent, error }
+}
+
+/// Result of a tag pass: reports sent, and the last report error.
+#[derive(Debug, Default)]
+pub struct Tagged {
+    pub sent: usize,
+    pub error: Option<String>,
 }
 
 pub fn notify(client: &Client, title: &str, body: &str) -> Option<String> {
@@ -286,21 +347,77 @@ mod tests {
     #[test]
     fn matching_and_presence() {
         let c = cat();
-        assert_eq!(project_for_cwd(&c, "/w/shop/admin/q").unwrap().id, "b");
-        assert!(project_for_cwd(&c, "/w/shopx").is_none());
-        let m = workspace_projects(&c, &snap(), None);
+        assert_eq!(
+            project_for_cwd(&c, "/w/shop/admin/q", &Roots::new())
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert!(project_for_cwd(&c, "/w/shopx", &Roots::new()).is_none());
+        let m = workspace_projects(&c, &snap(), None, &Roots::new());
         assert_eq!(m["w1"], "a");
         assert_eq!(m["w2"], "b");
         assert!(!m.contains_key("w3"));
-        let pr = presence(&c, &snap(), None);
+        let pr = presence(&c, &snap(), None, &Roots::new());
         assert_eq!(pr["a"].workspaces, vec![(1, "w1".to_string())]);
         assert_eq!((pr["a"].working, pr["a"].done), (1, 1));
         assert_eq!(pr["b"].blocked, 1);
         assert_eq!(pr["b"].workspaces, vec![(2, "w2".to_string())]);
         // Our own pane (w1:p3) does not count; the tie goes to the deeper project.
-        let pr = presence(&c, &snap(), Some("w1:p3"));
+        let pr = presence(&c, &snap(), Some("w1:p3"), &Roots::new());
         assert_eq!(pr["a"].done, 0);
         assert_eq!(pr["b"].workspaces.len(), 2);
+    }
+
+    #[test]
+    fn worktrees_outside_the_project_count() {
+        let c = cat();
+        let mut s = snap();
+        s.panes = vec![pane(
+            "w3:p1",
+            "w3",
+            "/h/wt/shop/fix/src",
+            AgentStatus::Working,
+        )];
+        assert!(workspace_projects(&c, &s, None, &Roots::new()).is_empty());
+        let roots: Roots = [("a".to_string(), vec!["/h/wt/shop/fix".to_string()])].into();
+        assert_eq!(
+            project_for_cwd(&c, "/h/wt/shop/fix/src", &roots)
+                .unwrap()
+                .id,
+            "a"
+        );
+        assert_eq!(workspace_projects(&c, &s, None, &roots)["w3"], "a");
+        assert_eq!(presence(&c, &s, None, &roots)["a"].working, 1);
+        // The roots come from the metadata cache.
+        let meta = |p: &Project| {
+            (p.id == "a").then(|| Meta {
+                git: Some(GitInfo {
+                    worktrees: vec!["/h/wt/shop/fix".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        };
+        assert_eq!(worktree_roots(&c, &meta), roots);
+    }
+
+    #[test]
+    fn token_limits() {
+        let mut p = Project::new("/w/x");
+        p.name = "n".repeat(81);
+        let t = tokens_for(&p, None);
+        let v = t["pt_project"].as_deref().unwrap();
+        assert!(v.len() <= TOKEN_MAX && v.ends_with('…'), "{v}");
+        p.name = "я".repeat(60); // 120 bytes
+        let v = tokens_for(&p, None)["pt_project"].clone().unwrap();
+        assert!(v.len() <= TOKEN_MAX && v.starts_with("Я"), "{v}");
+        assert_eq!(t["pt_id"].as_deref(), Some(p.id.as_str()));
+        p.id = "i".repeat(81);
+        assert_eq!(tokens_for(&p, None)["pt_id"], None);
+        p.languages = Some(vec!["L".repeat(100)]);
+        assert!(tokens_for(&p, None)["pt_langs"].as_ref().unwrap().len() <= TOKEN_MAX);
+        assert_eq!(token_value("short"), "short");
     }
 
     #[test]

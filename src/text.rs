@@ -140,11 +140,21 @@ pub fn expand_path(p: &str, base: &str) -> PathBuf {
     out
 }
 
-/// Comparison key for paths (macOS file systems are case-insensitive by default).
+/// Comparison key for paths. On macOS the file system is case-insensitive by default and
+/// `/tmp`, `/var`, `/etc` are symlinks into `/private` (git reports one, a shell cwd the other);
+/// elsewhere paths compare as they are.
 pub fn norm(p: &str) -> String {
     let s = p.trim_end_matches('/');
     let s = if s.is_empty() { "/" } else { s };
-    s.to_lowercase()
+    if cfg!(target_os = "macos") {
+        let s = ["/private/tmp", "/private/var", "/private/etc"]
+            .iter()
+            .find(|a| s == **a || s.starts_with(&format!("{a}/")))
+            .map_or(s, |_| &s["/private".len()..]);
+        s.to_lowercase()
+    } else {
+        s.to_string()
+    }
 }
 
 /// `child` is `parent` or inside it.
@@ -229,7 +239,15 @@ mod tests {
         assert_eq!(short_path_in("/Users/me/x", "/Users/me"), "~/x");
         assert_eq!(short_path_in("/Users/mex", "/Users/me"), "/Users/mex");
         assert!(within("/a/b/c", "/a/b"));
-        assert!(within("/a/B/", "/a/b"));
+        // Case and /private aliases fold on macOS only.
+        assert_eq!(within("/a/B/", "/a/b"), cfg!(target_os = "macos"));
+        assert_eq!(
+            within("/tmp/wt/src", "/private/tmp/wt"),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(within("/private/var/x", "/var"), cfg!(target_os = "macos"));
+        assert!(!within("/privatex/tmp", "/tmp"));
+        assert_eq!(norm("/private"), norm("/private"));
         assert!(!within("/a/bc", "/a/b"));
         assert_eq!(expand_path("../x/./y", "/a/b"), PathBuf::from("/a/x/y"));
         let id = new_id();

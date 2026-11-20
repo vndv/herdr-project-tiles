@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 /// Messages from background threads.
 pub enum Msg {
     Meta,
+    /// A sidebar token report failed.
+    TagError(String),
     Snapshot(Box<SessionSnapshot>),
     LiveDown(String),
     GitDone {
@@ -213,7 +215,9 @@ impl App {
             .env
             .ctx
             .here()
-            .and_then(|h| presence::project_for_cwd(&app.store.data, &h).map(|p| p.id.clone()))
+            .and_then(|h| {
+                presence::project_for_cwd(&app.store.data, &h, &app.roots()).map(|p| p.id.clone())
+            })
             .or_else(|| app.store.data.projects.first().map(|p| p.id.clone()));
         if let Some(id) = start {
             app.pending = Some(Focus::Tile(id));
@@ -246,8 +250,11 @@ impl App {
     }
 
     fn save(&mut self) {
-        if let Err(e) = self.store.save() {
-            self.msg(&format!("could not save projects.json: {e}"), true);
+        match self.store.save() {
+            // Another writer's projects came in: fetch their metadata.
+            Ok(true) => self.refresh_all(false, None),
+            Ok(false) => {}
+            Err(e) => self.msg(&format!("could not save projects.json: {e}"), true),
         }
         self.recompute_presence();
         self.need_tag = true;
@@ -257,7 +264,11 @@ impl App {
 
     pub fn on_msg(&mut self, m: Msg) {
         match m {
-            Msg::Meta => self.need_tag = true,
+            Msg::Meta => {
+                // New worktrees can change which workspace belongs to which project.
+                self.recompute_presence();
+                self.need_tag = true;
+            }
             Msg::Snapshot(s) => {
                 self.snap = Some(*s);
                 self.live_error = None;
@@ -265,6 +276,7 @@ impl App {
                 self.need_tag = true;
             }
             Msg::LiveDown(e) => self.live_error = Some(e),
+            Msg::TagError(e) => self.msg(&format!("sidebar tokens not sent: {e}"), true),
             Msg::GitDone {
                 id,
                 op,
@@ -279,6 +291,14 @@ impl App {
                     .unwrap_or_default();
                 if ok {
                     self.msg(&format!("git {}: done — {name}", op.name()), false);
+                    // The counts reflect the remote now; the rescan below keeps that.
+                    if let Some(mut m) = self.meta.get(&id) {
+                        m.remote_at = crate::meta::now();
+                        if let Some(g) = m.git.as_mut() {
+                            g.fetched = true;
+                        }
+                        self.meta.set(&id, m);
+                    }
                 } else {
                     self.msg(
                         &format!("git {} failed — {name}: {message}", op.name()),
@@ -299,9 +319,19 @@ impl App {
         }
     }
 
+    /// Worktree roots of catalog projects, from the metadata cache.
+    pub fn roots(&self) -> presence::Roots {
+        presence::worktree_roots(&self.store.data, &|p| self.meta.get(&p.id))
+    }
+
     pub fn recompute_presence(&mut self) {
         self.presence = match &self.snap {
-            Some(s) => presence::presence(&self.store.data, s, self.env.own_pane.as_deref()),
+            Some(s) => presence::presence(
+                &self.store.data,
+                s,
+                self.env.own_pane.as_deref(),
+                &self.roots(),
+            ),
             None => HashMap::new(),
         };
     }
@@ -325,7 +355,7 @@ impl App {
 
     fn here_project(&self) -> Option<String> {
         let h = self.env.ctx.here()?;
-        presence::project_for_cwd(self.cat(), &h).map(|p| p.id.clone())
+        presence::project_for_cwd(self.cat(), &h, &self.roots()).map(|p| p.id.clone())
     }
 
     fn matches(&self, p: &Project) -> bool {
@@ -2132,6 +2162,9 @@ pub fn clear_area(buf: &mut Buffer, r: Rect, style: Style) {
 fn boxed(buf: &mut Buffer, area: Rect, bw: u16, bh: u16, t: &Theme, title: &str) -> Rect {
     let bw = bw.min(area.width);
     let bh = bh.min(area.height);
+    if bw < 4 || bh < 2 {
+        return Rect::new(area.x, area.y, 0, 0);
+    }
     let x0 = area.x + (area.width - bw) / 2;
     let y0 = area.y + (area.height - bh) / 2;
     let base = Style::default().fg(t.text).bg(t.panel_bg);
@@ -2155,6 +2188,9 @@ fn boxed(buf: &mut Buffer, area: Rect, bw: u16, bh: u16, t: &Theme, title: &str)
 
 fn draw_help(buf: &mut Buffer, area: Rect, t: &Theme) {
     let r = boxed(buf, area, 70, HELP.len() as u16 + 4, t, "Keys");
+    if r.height < 3 {
+        return;
+    }
     let inner = r.width.saturating_sub(17) as usize;
     for (i, (k, d)) in HELP.iter().enumerate() {
         let y = r.y + 2 + i as u16;
@@ -2181,6 +2217,9 @@ fn draw_help(buf: &mut Buffer, area: Rect, t: &Theme) {
 fn draw_confirm(buf: &mut Buffer, area: Rect, t: &Theme, q: &str) {
     let w = (width(q) as u16 + 6).clamp(30, area.width.saturating_sub(2).max(30));
     let r = boxed(buf, area, w, 5, t, "Confirm");
+    if r.height < 4 {
+        return;
+    }
     let inner = r.width.saturating_sub(4) as usize;
     buf.set_stringn(
         r.x + 2,

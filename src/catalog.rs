@@ -229,11 +229,18 @@ impl CatalogData {
 }
 
 /// The catalog file with change detection by mtime.
+///
+/// Several writers share the file (the TUI panel, `app import`, `add-current`, the Herdr.app
+/// mod, hand edits). `save` never overwrites a change it has not seen: under a lock it re-reads
+/// the file and merges three ways (last read vs. ours vs. on disk) by project/collection id.
 pub struct CatalogStore {
     pub path: PathBuf,
     pub data: CatalogData,
+    /// The state last read from or written to disk: the merge base.
+    base: CatalogData,
     mtime: Option<SystemTime>,
-    /// Last load error (unparsable hand edit), shown in the status line.
+    /// Last load error (unparsable hand edit), shown in the status line. While set, `save`
+    /// refuses to write, so a broken file is left for the user to fix.
     pub error: Option<String>,
 }
 
@@ -242,6 +249,7 @@ impl CatalogStore {
         let mut s = CatalogStore {
             path,
             data: CatalogData::default(),
+            base: CatalogData::default(),
             mtime: None,
             error: None,
         };
@@ -270,6 +278,7 @@ impl CatalogStore {
         {
             Ok(d) => {
                 self.error = None;
+                self.base = d.clone();
                 if d != self.data {
                     self.data = d;
                     return true;
@@ -283,12 +292,132 @@ impl CatalogStore {
         }
     }
 
-    pub fn save(&mut self) -> std::io::Result<()> {
+    /// Writes `data`, merged with whatever another writer saved since the last read.
+    /// Refuses while the file on disk does not parse.
+    /// Returns true when another writer's changes were merged in.
+    pub fn save(&mut self) -> std::io::Result<bool> {
+        if let Some(e) = &self.error {
+            return Err(std::io::Error::other(format!(
+                "projects.json does not parse, fix it first: {e}"
+            )));
+        }
+        let _lock = lock(&self.path)?;
+        let disk = match fs::read_to_string(&self.path) {
+            Ok(s) => match CatalogData::parse(&s) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    self.mtime = self.current_mtime();
+                    return Err(std::io::Error::other(format!(
+                        "projects.json does not parse, not overwriting it: {e}"
+                    )));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let mut merged = false;
+        if let Some(theirs) = disk.filter(|d| *d != self.base) {
+            self.data = merge3(&self.base, &self.data, &theirs);
+            merged = true;
+        }
         write_atomic(&self.path, self.data.to_json().as_bytes())?;
         self.mtime = self.current_mtime();
-        self.error = None;
-        Ok(())
+        self.base = self.data.clone();
+        Ok(merged)
     }
+}
+
+/// An advisory lock next to the catalog that serializes this binary's read-merge-write.
+/// (The Herdr.app mod uses `writeTextFile`'s expected-text check instead.)
+fn lock(path: &Path) -> std::io::Result<fs::File> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let f = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_file_name(format!(".{name}.lock")))?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Three-way merge of the catalog: `ours` and `theirs` both started from `base`.
+/// Projects and collections merge by id (and then field by field); where both sides changed the
+/// same field, ours wins. A side's additions are kept; a deletion is kept unless the other side
+/// edited the entry.
+pub fn merge3(base: &CatalogData, ours: &CatalogData, theirs: &CatalogData) -> CatalogData {
+    let v = |d: &CatalogData| serde_json::to_value(d).unwrap_or(Value::Null);
+    let merged = merge_value(&v(base), &v(ours), &v(theirs), true);
+    serde_json::from_value(merged).unwrap_or_else(|_| ours.clone())
+}
+
+fn merge_value(b: &Value, o: &Value, t: &Value, top: bool) -> Value {
+    if o == b {
+        return t.clone();
+    }
+    if t == b || o == t {
+        return o.clone();
+    }
+    match (b, o, t) {
+        (Value::Object(b), Value::Object(o), Value::Object(t)) => {
+            let mut out = Map::new();
+            let keys = o.keys().chain(t.keys().filter(|k| !o.contains_key(*k)));
+            for k in keys {
+                let (bv, ov, tv) = (b.get(k), o.get(k), t.get(k));
+                let by_id = top && (k == "projects" || k == "collections");
+                let merged = match (bv, ov, tv) {
+                    (Some(Value::Array(ba)), Some(Value::Array(oa)), Some(Value::Array(ta)))
+                        if by_id =>
+                    {
+                        Some(Value::Array(merge_list(ba, oa, ta)))
+                    }
+                    (Some(bv), Some(ov), Some(tv)) => Some(merge_value(bv, ov, tv, false)),
+                    (None, Some(ov), _) => Some(ov.clone()),
+                    (None, None, Some(tv)) => Some(tv.clone()),
+                    // Removed on one side: keep it only if the other side changed it.
+                    (Some(bv), None, Some(tv)) => (tv != bv).then(|| tv.clone()),
+                    (Some(bv), Some(ov), None) => (ov != bv).then(|| ov.clone()),
+                    _ => None,
+                };
+                if let Some(m) = merged {
+                    out.insert(k.clone(), m);
+                }
+            }
+            Value::Object(out)
+        }
+        _ => o.clone(),
+    }
+}
+
+fn merge_list(b: &[Value], o: &[Value], t: &[Value]) -> Vec<Value> {
+    let id = |v: &Value| v.get("id").and_then(|x| x.as_str()).map(str::to_string);
+    let find = |l: &[Value], k: &str| l.iter().find(|v| id(v).as_deref() == Some(k)).cloned();
+    let ids = |l: &[Value]| l.iter().filter_map(id).collect::<Vec<_>>();
+    // Order: ours, unless only the other side reordered.
+    let (first, second) = if ids(o) == ids(b) { (t, o) } else { (o, t) };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for k in ids(first).into_iter().chain(ids(second)) {
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        let item = match (find(b, &k), find(o, &k), find(t, &k)) {
+            (Some(bv), Some(ov), Some(tv)) => Some(merge_value(&bv, &ov, &tv, false)),
+            (None, Some(ov), _) => Some(ov),
+            (None, None, Some(tv)) => Some(tv),
+            (Some(bv), None, Some(tv)) => (tv != bv).then_some(tv),
+            (Some(bv), Some(ov), None) => (ov != bv).then_some(ov),
+            _ => None,
+        };
+        out.extend(item);
+    }
+    out
 }
 
 /// Writes through a temp file in the same directory and renames it into place.
@@ -351,7 +480,9 @@ mod tests {
     #[test]
     fn lookups() {
         let mut d = CatalogData::parse(VSCODE).unwrap();
-        assert_eq!(d.find_path("/users/me/shop/"), Some(0));
+        assert_eq!(d.find_path("/Users/me/shop/"), Some(0));
+        let folded = d.find_path("/users/me/shop");
+        assert_eq!(folded, cfg!(target_os = "macos").then_some(0));
         assert_eq!(d.collection_by_name(" work ").unwrap().id, "c1");
         let id = d.ensure_collection("New", |_| "#000000".into()).unwrap();
         assert_eq!(d.collections.len(), 2);
@@ -377,6 +508,59 @@ mod tests {
         assert!(!s.reload());
         assert!(s.error.is_some());
         assert_eq!(s.data.projects.len(), 1);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn two_writers_merge() {
+        let dir = std::env::temp_dir().join(format!("pt-cat-{}", text::new_id()));
+        let path = dir.join("projects.json");
+        let mut a = CatalogStore::open(path.clone());
+        a.data.projects.push(Project::new("/tmp/a"));
+        a.data.projects.push(Project::new("/tmp/c"));
+        a.save().unwrap();
+        let mut b = CatalogStore::open(path.clone());
+        // b adds B and edits c's description; a renames A and removes c.
+        b.data.projects.push(Project::new("/tmp/b"));
+        b.data.projects[1].description = Some("kept".into());
+        assert!(!b.save().unwrap());
+        a.data.projects[0].name = "Renamed".into();
+        a.data.projects.remove(1);
+        assert!(a.save().unwrap());
+        let disk = CatalogData::parse(&fs::read_to_string(&path).unwrap()).unwrap();
+        let names: Vec<_> = disk.projects.iter().map(|p| p.name.as_str()).collect();
+        // c was edited by b, so a's removal does not drop it.
+        assert_eq!(names, ["Renamed", "c", "b"]);
+        assert_eq!(disk.projects[1].description.as_deref(), Some("kept"));
+        assert_eq!(a.data, disk);
+        // Both sides change the same field: ours wins.
+        let mut b = CatalogStore::open(path.clone());
+        a.data.projects[0].name = "A1".into();
+        b.data.projects[0].name = "B1".into();
+        b.save().unwrap();
+        a.save().unwrap();
+        assert_eq!(CatalogStore::open(path.clone()).data.projects[0].name, "A1");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn broken_file_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("pt-cat-{}", text::new_id()));
+        let path = dir.join("projects.json");
+        let mut s = CatalogStore::open(path.clone());
+        s.data.projects.push(Project::new("/tmp/a"));
+        s.save().unwrap();
+        // Broken between two saves (mtime may not have moved yet).
+        fs::write(&path, "{ broken").unwrap();
+        s.data.projects.push(Project::new("/tmp/b"));
+        assert!(s.save().is_err());
+        assert!(s.error.is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
+        // Broken at start.
+        let mut t = CatalogStore::open(path.clone());
+        t.data.projects.push(Project::new("/tmp/c"));
+        assert!(t.save().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
         fs::remove_dir_all(dir).ok();
     }
 }

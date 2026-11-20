@@ -35,6 +35,10 @@ t("paths", () => {
   assert.equal(m.expandPath(" ~/a ", "/h"), "/h/a");
   assert(m.within("/a/B/c", "/a/b/"));
   assert(!m.within("/a/bc", "/a/b"));
+  assert(m.within("/tmp/wt/src", "/private/tmp/wt"));
+  assert(m.within("/private/var/x", "/var"));
+  assert(!m.within("/privatex/tmp", "/tmp"));
+  assert.equal(m.norm("/private/tmpx"), "/private/tmpx");
 });
 
 const theme = { ansi1: "#ff0000", ansi2: "#00ff00", ansi3: "#ff8800", ansi4: "#0000ff", ansi5: "#aa00aa", ansi6: "#00aaaa", ansi11: "#ffff00", dim: "#777777" };
@@ -145,6 +149,14 @@ t("labels and git badges", () => {
   assert.equal(m.pct(91.94), "91.9%");
   assert.equal(m.pct(0.5), "0.5%");
   assert.equal(m.ago("2 days"), "2 days ago");
+});
+
+t("metadata follows the folder", () => {
+  const p = { id: "a", path: "/new/repo" };
+  assert.equal(m.metaFits(undefined, p), false);
+  assert.equal(m.metaFits({ path: "/old/repo", git: { branch: "x" } }, p), false);
+  assert.equal(m.metaFits({ path: "/new/repo/" }, p), true);
+  assert.equal(m.metaFits({ git: {} }, p), true); // old cache without a path
 });
 
 t("shown", () => {

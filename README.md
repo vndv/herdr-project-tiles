@@ -25,7 +25,7 @@ catalog, settings and cache with the TUI plugin and uses this binary as its back
 
     cargo build --release --locked
     mkdir -p ~/.config/herdr-app/mods/project-tiles
-    cp mod/project-tiles/{main.js,model.js,mod.json} ~/.config/herdr-app/mods/project-tiles/
+    cp -R mod/project-tiles/{main.js,model.js,mod.json,icons} ~/.config/herdr-app/mods/project-tiles/
     herdr-app check ~/.config/herdr-app/mods/project-tiles
     node mod/test.mjs   # tests for the mod's pure logic
 
@@ -43,7 +43,10 @@ Marks are live from `spaces()`/`panes()`: `◆ N` spaces showing the project, `�
 working/blocked/done. Git errors are Herdr toasts (`notify`).
 Clicking a tile's branch opens it on the remote's web page (GitLab `/-/tree/`, GitHub `/tree/`,
 Bitbucket `/src/`; the repository when the branch is not pushed under its own name), clicking the
-commit hash opens the commit. The address comes from `git remote get-url` (no network).
+commit hash opens the commit. The address comes from `git remote get-url` (no network); only `https://` addresses with a dotted
+host are built (an ssh alias, a local path or an odd remote gives no link).
+With [herdr-gitview](https://github.com/ChmaraX/herdr-gitview) installed, a tile's ± button, `g`
+or a click on the changed-files count opens gitview for the project (in its space).
 
 ## Install (herdr TUI plugin)
 
@@ -90,7 +93,10 @@ Press `?` in the panel.
 
 - `$HERDR_PLUGIN_CONFIG_DIR/projects.json` — the catalog, same shape as Project Tiles
   (unknown fields are kept). Written atomically, reloaded when it changes on disk; a broken
-  file is left alone and the current state kept.
+  file is left alone (edits are refused until it parses) and the current state kept. Several
+  writers share it: the binary saves under a lock (`.projects.json.lock`) and merges what others
+  wrote since its last read (by project/collection id, field by field; on a clash its own edit
+  wins); the Herdr.app mod writes only if the file is unchanged since it read it.
 - `$HERDR_PLUGIN_CONFIG_DIR/settings.json` — `columns, tile_size, show_path, show_description,
   show_languages, show_git, fetch_remote, metadata_cache_minutes, language_cache_hours,
   max_files_scanned, open_mode (workspace|tab), language_ignore_dirs`.

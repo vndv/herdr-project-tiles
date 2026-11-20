@@ -20,7 +20,11 @@ pub struct Meta {
     pub git_checked: bool,
     pub languages: Vec<(String, f64)>,
     pub languages_scanned: bool,
+    /// Last local git scan.
     pub fetched_at: f64,
+    /// Last `git fetch` attempt (`git.fetched` says whether it worked). Kept apart from
+    /// `fetched_at` so local rescans do not postpone the network refresh.
+    pub remote_at: f64,
     pub languages_at: f64,
 }
 
@@ -131,9 +135,17 @@ impl Metadata {
             }
             let m = g.cache.get(&p.id);
             let moved = m.map(|m| m.path != p.path).unwrap_or(true);
-            let git_due = force
-                || moved
-                || t - m.map(|m| m.fetched_at).unwrap_or(0.0) > s.metadata_cache_minutes * 60.0;
+            let ttl = s.metadata_cache_minutes * 60.0;
+            let fetch = fetch.unwrap_or(s.fetch_remote);
+            // Only repositories with an upstream (or not yet looked at) have anything to fetch.
+            let has_upstream = m
+                .and_then(|m| m.git.as_ref())
+                .is_none_or(|g| g.upstream.is_some());
+            let remote_due = fetch
+                && has_upstream
+                && (force || moved || t - m.map(|m| m.remote_at).unwrap_or(0.0) > ttl);
+            let git_due =
+                force || moved || remote_due || t - m.map(|m| m.fetched_at).unwrap_or(0.0) > ttl;
             let lang_due = force
                 || moved
                 || t - m.map(|m| m.languages_at).unwrap_or(0.0) > s.language_cache_hours * 3600.0;
@@ -145,10 +157,9 @@ impl Metadata {
             let me = self.clone();
             let p = p.clone();
             let s = s.clone();
-            let fetch = fetch.unwrap_or(s.fetch_remote);
             std::thread::spawn(move || {
                 me.acquire();
-                me.work(&p, &s, git_due, lang_due, fetch);
+                me.work(&p, &s, git_due, lang_due, remote_due);
                 me.release();
                 me.inner.lock().unwrap().busy.remove(&p.id);
                 (me.notify)(&p.id);
@@ -214,6 +225,7 @@ impl Metadata {
                     m.git = Some(g);
                 }
                 m.fetched_at = now();
+                m.remote_at = m.fetched_at;
                 self.publish(&p.id, m.clone());
             }
         }
@@ -255,6 +267,48 @@ mod tests {
         assert_eq!(availability("/"), None);
         assert_eq!(availability("/Volumes/NoSuchDisk-pt/x"), Some("offline"));
         assert_eq!(availability("/tmp/no-such-dir-pt-test"), Some("deleted"));
+    }
+
+    #[test]
+    fn local_rescan_does_not_postpone_fetch() {
+        let dir = std::env::temp_dir().join(format!("pt-meta-{}", crate::text::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = Metadata::new(None, Arc::new(|_: &str| {}));
+        let p = Project::new(&dir.to_string_lossy());
+        let s = Settings {
+            fetch_remote: true,
+            show_languages: false,
+            ..Settings::default()
+        };
+        // Fresh local scan, a day-old fetch, an upstream: a fetch refresh is due.
+        md.set(
+            &p.id,
+            Meta {
+                path: p.path.clone(),
+                git: Some(GitInfo {
+                    upstream: Some("origin/main".into()),
+                    fetched: true,
+                    ..Default::default()
+                }),
+                git_checked: true,
+                fetched_at: now(),
+                remote_at: now() - 86400.0,
+                languages_at: now(),
+                ..Default::default()
+            },
+        );
+        md.refresh(&p, &s, false, Some(false));
+        assert!(
+            !md.is_busy(&p.id),
+            "local data fresh, no fetch asked: nothing to do"
+        );
+        md.refresh(&p, &s, false, Some(true));
+        assert!(md.is_busy(&p.id), "fetch is due by remote_at");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while md.is_busy(&p.id) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

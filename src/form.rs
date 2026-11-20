@@ -153,6 +153,21 @@ impl Form {
     pub fn render(&self, buf: &mut Buffer, area: Rect, t: &Theme) -> Option<(u16, u16)> {
         let w = area.width.saturating_sub(4).clamp(20, 76);
         let h = self.height().min(area.height);
+        // Frame + one field + hint/error/footer must fit; otherwise just say so.
+        if w > area.width || h < 7 {
+            if area.width > 0 && area.height > 0 {
+                let y = area.y + area.height / 2;
+                let s = Style::default().fg(t.yellow).bg(t.panel_bg);
+                buf.set_stringn(
+                    area.x,
+                    y,
+                    "window too small for the form",
+                    area.width as usize,
+                    s,
+                );
+            }
+            return None;
+        }
         let x0 = area.x + area.width.saturating_sub(w) / 2;
         let y0 = area.y + area.height.saturating_sub(h) / 2;
         let rect = Rect::new(x0, y0, w, h);
@@ -305,5 +320,34 @@ mod tests {
         assert_eq!(f.focus, 0);
         assert_eq!(f.handle(key(KeyCode::Enter)), Outcome::Submit);
         assert_eq!(f.handle(key(KeyCode::Esc)), Outcome::Cancel);
+    }
+
+    #[test]
+    fn render_in_tiny_areas_does_not_panic() {
+        let f = Form::new(
+            "t",
+            vec![Field::text("a", "ab", "hint"), Field::text("b", "", "")],
+        );
+        let t = Theme::default();
+        for (w, h) in [
+            (80, 24),
+            (19, 24),
+            (20, 24),
+            (24, 7),
+            (80, 6),
+            (80, 2),
+            (80, 1),
+            (80, 0),
+            (0, 0),
+            (1, 1),
+        ] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            f.render(&mut buf, area, &t);
+        }
+        // Offset areas too (the form is drawn inside the panel).
+        let area = Rect::new(3, 2, 19, 5);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 10));
+        f.render(&mut buf, area, &t);
     }
 }

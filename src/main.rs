@@ -147,17 +147,29 @@ fn cmd_add_current() -> Result<(), String> {
 /// Hook `tag`: refreshes local git state of the open projects and reports sidebar tokens.
 fn cmd_tag() -> Result<(), String> {
     let c = client()?;
-    let n = tag_with(&c, &Paths::from_env());
-    println!("project-tiles tag: {n} workspace(s) updated");
-    Ok(())
+    let r = tag_with(&c, &Paths::from_env());
+    println!("project-tiles tag: {} workspace(s) updated", r.sent);
+    match r.error {
+        Some(e) => Err(format!("token report failed: {e}")),
+        None => Ok(()),
+    }
 }
 
-fn tag_with(c: &Client, paths: &Paths) -> usize {
-    let Ok(snap) = c.snapshot() else { return 0 };
+fn tag_with(c: &Client, paths: &Paths) -> presence::Tagged {
+    let snap = match c.snapshot() {
+        Ok(s) => s,
+        Err(e) => {
+            return presence::Tagged {
+                sent: 0,
+                error: Some(e.to_string()),
+            };
+        }
+    };
     let store = CatalogStore::open(paths.catalog());
     let settings = Settings::load(&paths.settings());
     let md = meta::Metadata::new(Some(paths.cache()), std::sync::Arc::new(|_: &str| {}));
-    let open = presence::workspace_projects(&store.data, &snap, None);
+    let roots = presence::worktree_roots(&store.data, &|p| md.get(&p.id));
+    let open = presence::workspace_projects(&store.data, &snap, None, &roots);
     // Fresh local git info (no network) for the projects that are open.
     for id in open.values() {
         if let Some(p) = store.data.project(id)
@@ -265,9 +277,13 @@ fn event_loop(
             let md = app.meta.clone();
             let own = app.env.own_pane.clone();
             let flag = tagging.clone();
+            let tx = app.tx.clone();
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::spawn(move || {
-                presence::tag_all(&c, &cat, &snap, &|p| md.get(&p.id), own.as_deref());
+                let r = presence::tag_all(&c, &cat, &snap, &|p| md.get(&p.id), own.as_deref());
+                if let Some(e) = r.error {
+                    let _ = tx.send(ui::Msg::TagError(e));
+                }
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }

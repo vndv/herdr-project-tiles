@@ -55,12 +55,14 @@ pub fn meta_json(m: &Meta) -> Value {
         .map(|(n, p)| json!({ "name": n, "pct": p, "color": langs::color_of(n) }))
         .collect();
     json!({
+        "path": m.path,
         "availability": m.availability,
         "git": m.git,
         "git_checked": m.git_checked,
         "languages": langs,
         "languages_scanned": m.languages_scanned,
         "fetched_at": m.fetched_at,
+        "remote_at": m.remote_at,
         "languages_at": m.languages_at,
         "git_token": crate::presence::git_token(m),
         "links": m.git.as_ref().map(git::links),
@@ -131,6 +133,9 @@ fn git_op(paths: &Paths, args: &[String]) -> Result<Value, String> {
     });
     m.git_checked = true;
     m.fetched_at = crate::meta::now();
+    if o.ok() {
+        m.remote_at = m.fetched_at;
+    }
     md.set(&p.id, m.clone());
     md.flush();
     Ok(
