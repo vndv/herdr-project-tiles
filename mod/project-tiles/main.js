@@ -15,7 +15,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import {
   spaces, panes, focused, theme, run, exec, home, notify, props, closeOverlay, openOverlay,
-  readTextFile, writeTextFile, checking, pickFolder, layout, nextCommand,
+  readTextFile, writeTextFile, checking, pickFolder, layout, nextCommand, appHome,
 } from "herdr";
 import * as M from "./model.js";
 
@@ -27,6 +27,7 @@ const HELP = [
   ["o", "open in a new space"],
   ["t", "open as a new tab in the current space"],
   ["w / W", "new git worktree / open an existing one"],
+  ["g", "gitview: review, stage and commit the project's changes"],
   ["/", "search (name, path, description, languages, branch)"],
   ["a / A", "add the current folder / a folder by path"],
   ["I", "import: open terminals + Project Tiles (VS Code)"],
@@ -114,6 +115,8 @@ export default class ProjectTiles extends View {
   }
 
   async boot(cx) {
+    // gitview (github.com/ChmaraX/herdr-gitview) is optional: its button shows when it is installed.
+    this.hasGitview = (await readTextFile(`${appHome()}/mods/gitview-tab/mod.json`).catch(() => null)) !== null;
     try {
       this.paths = await this.backend(["paths"]);
     } catch (e) {
@@ -305,6 +308,20 @@ export default class ProjectTiles extends View {
   openUrl(url) {
     if (!url) return;
     exec("open", [url]).catch((e) => this.say(`could not open ${url}: ${e.message}`, true));
+  }
+
+  /** gitview for this project: show its space (the open one, else a new one), then gitview's own
+   *  launcher (cmd-g), which opens the gitview tab for the shown space's repo. */
+  gitview(p, pres) {
+    if (!this.hasGitview) return this.say("gitview is not installed (github.com/ChmaraX/herdr-gitview)", true);
+    if (!this.meta[p.id]?.git) return this.say("not a git repository", true);
+    if (this.meta[p.id]?.availability) return this.say(`folder unavailable: ${p.path}`, true);
+    this.close();
+    const open = pres[p.id]?.spaces ?? [];
+    const s = open.find((x) => x.active) ?? open[0];
+    if (s) run("space.select", { id: s.id });
+    else run("space.new", { folder: p.path, name: p.name });
+    run("mod.open", { name: "gitview-tab" });
   }
 
   /** Herdr's worktree dialog for this repository: "new" makes a checkout and opens it as a space
@@ -650,6 +667,7 @@ export default class ProjectTiles extends View {
     else if (key === "t" && p) this.open(p, "tab", d.pres);
     else if (key === "w" && p) this.worktree(p, "new");
     else if (key === "W" && p) this.worktree(p, "open");
+    else if (key === "g" && p) this.gitview(p, d.pres);
     else if (key === "a") {
       const cwd = focused()?.cwd;
       if (cwd) this.addPath(cx, cwd, this.collectionOf(cur));
@@ -978,7 +996,11 @@ export default class ProjectTiles extends View {
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(branchUrl); }))
             .child(div().truncate().text_size(11.5).font_medium().text_color(t.foreground).child(g.branch)))
-          .when(g.dirty > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.working).child(`● ${g.dirty}`)))
+          .when(g.dirty > 0, (el) => el.child(div().id(`pt-dirty-${p.id}`).flex_none().px(4).rounded(4).text_size(11).text_color(t.working)
+            .when(this.hasGitview, (d2) => d2.cursor_pointer().hover((st) => st.bg(t.hover))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => { cx.stop_propagation(); this.gitview(p, d.pres); }))
+            .child(`● ${g.dirty}`)))
           .when((g.worktrees?.length ?? 0) > 0, (el) => el.child(h_flex().id(`pt-wt-${p.id}`).flex_none().gap(3).px(6).h(18).rounded(9)
             .items_center().cursor_pointer().hover((st) => st.bg(t.hover))
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -1014,6 +1036,7 @@ export default class ProjectTiles extends View {
       .child(this.button(t, `pt-tab-${p.id}`, "terminal", w >= 300 ? "New tab" : "", false, () => this.open(p, "tab", d.pres)))
       .when(Boolean(g), (el) => el.child(this.button(t, `pt-wt-new-${p.id}`, "worktree", w >= 400 ? "Worktree" : "", false, () => this.worktree(p, "new"))))
       .child(div().flex_1().min_w(4))
+      .when(Boolean(g) && this.hasGitview, (el) => el.child(this.iconButton(t, `pt-gv-${p.id}`, "gitview", "", t.muted, () => this.gitview(p, d.pres))))
       .when(Boolean(g), (el) => el
         .child(this.iconButton(t, `pt-r-${p.id}`, busy ? "spinner" : "refresh", "", t.muted, (cx) => this.gitOp(cx, p, "fetch")))
         .child(this.iconButton(t, `pt-pull-${p.id}`, "down", g?.behind ? String(g.behind) : "", g?.behind ? t.ansi4 : t.muted, (cx) => this.gitOp(cx, p, "pull")))
