@@ -1,5 +1,7 @@
 // Project Tiles: a dashboard of projects as tiles (name, logo, path, description, languages,
-// git), grouped into collapsible collections. Opened as a dialog (mod.open:project-tiles).
+// git), grouped into collapsible collections. Two ways to show it: a dialog
+// (mod.open:project-tiles), or embedded in a layout block (props {embedded: true}), e.g. the
+// command-center layout's center stack next to Terminals and Board.
 //
 // Live from Herdr (no polling): which spaces show a project (◆ 1,3), where you are (● here),
 // and the agents working / blocked / done in it. Git and languages come from the
@@ -13,7 +15,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import {
   spaces, panes, focused, theme, run, exec, home, notify, props, closeOverlay, openOverlay,
-  readTextFile, writeTextFile, checking, pickFolder,
+  readTextFile, writeTextFile, checking, pickFolder, layout, nextCommand,
 } from "herdr";
 import * as M from "./model.js";
 
@@ -24,7 +26,7 @@ const HELP = [
   ["Enter", "open: go to the project's space, or create one"],
   ["o", "open in a new space"],
   ["t", "open as a new tab in the current space"],
-  ["w", "new git worktree"],
+  ["w / W", "new git worktree / open an existing one"],
   ["/", "search (name, path, description, languages, branch)"],
   ["a / A", "add the current folder / a folder by path"],
   ["I", "import: open terminals + Project Tiles (VS Code)"],
@@ -35,6 +37,7 @@ const HELP = [
   ["f p P", "git fetch / pull --ff-only / push"],
   ["r / R", "refresh project / all (R also runs git fetch)"],
   ["O", "reveal in Finder"],
+  ["click branch / hash", "open the branch (or repo) / commit on GitLab, GitHub, Bitbucket"],
   ["c", "compact / normal"],
   ["E", "edit projects.json in $EDITOR (new tab)"],
   ["? / Esc", "help / close"],
@@ -63,11 +66,23 @@ export default class ProjectTiles extends View {
     this.modal = null;
     this.width = 1100;
     this.lastClick = null;
-    this.focusSelf();
-    cx.timer.after(400, () => this.focusSelf());
+    // Embedded in a layout block: never take the keyboard from a terminal on start.
+    this.embedded = Boolean(props()?.embedded) || !props()?.overlay;
+    if (!this.embedded) {
+      this.focusSelf();
+      cx.timer.after(400, () => this.focusSelf());
+    }
     if (checking()) return;
     cx.spawn(async (cx) => {
       await this.boot(cx);
+    });
+    // "focus": sent by pane.go (focusable) or by the tab bar when it shows this tab.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "focus") this.focusSelf();
+        cx.notify();
+      }
     });
     // The catalog can change on disk (hand edit, the TUI plugin, `E`).
     cx.timer.every(2000, (cx) => cx.spawn(async (cx) => {
@@ -213,9 +228,11 @@ export default class ProjectTiles extends View {
     const cols = M.columnsFor(Math.max(200, this.width - 32), this.settings);
     const { rows, items } = M.buildRows(this.cat, this.meta, this.query, cols);
     const local = spaces().filter((s) => !s.machine);
-    const pres = M.presence(this.cat, local, panes());
+    // Linked worktrees (~/.herdr/worktrees/...) count for their project.
+    const extra = M.worktreeRoots(this.meta);
+    const pres = M.presence(this.cat, local, panes(), extra);
     const f = focused();
-    const here = f?.cwd ? M.projectForCwd(this.cat, f.cwd)?.id ?? null : null;
+    const here = f?.cwd ? M.projectForCwd(this.cat, f.cwd, extra)?.id ?? null : null;
     return { cols, rows, items, pres, here };
   }
 
@@ -241,8 +258,27 @@ export default class ProjectTiles extends View {
 
   // ------------------------------------------------------------ actions
 
+  /** Embedded: the layout stack this block sits in, and whether it is the shown child. */
+  stackInfo() {
+    const find = (n) => {
+      for (const c of n?.children ?? []) {
+        if (c?.content?.mod === "project-tiles") return { stack: n, child: c };
+        const f = find(c);
+        if (f) return f;
+      }
+      return null;
+    };
+    const f = find(layout());
+    if (!f || f.stack.type !== "stack") return null;
+    const first = f.stack.children.find((c) => c.id !== f.child.id);
+    return { stack: f.stack.id, child: f.child.id, back: first?.id ?? null, shown: f.stack.active === f.child.id };
+  }
+
+  /** The dialog closes; the embedded tab goes back to the stack's other child (Terminals). */
   close() {
-    closeOverlay(props()?.overlay);
+    if (!this.embedded) return closeOverlay(props()?.overlay);
+    const s = this.stackInfo();
+    if (s?.back) run("layout.select", { stack: s.stack, child: s.back });
   }
 
   open(p, mode, pres) {
@@ -266,9 +302,18 @@ export default class ProjectTiles extends View {
     run("space.new", { folder: p.path, name: p.name });
   }
 
-  worktree(p) {
+  openUrl(url) {
+    if (!url) return;
+    exec("open", [url]).catch((e) => this.say(`could not open ${url}: ${e.message}`, true));
+  }
+
+  /** Herdr's worktree dialog for this repository: "new" makes a checkout and opens it as a space
+   *  nested under the repo; "open" lists the existing checkouts. */
+  worktree(p, action = "new") {
+    if (!this.meta[p.id]?.git) return this.say("not a git repository", true);
     this.close();
-    openOverlay({ mod: "worktree", kind: "dialog", width: 460, height: 280, props: { folder: p.path, machine: null, action: "new" } });
+    const size = action === "open" ? { width: 560, height: 480 } : { width: 460, height: 280 };
+    openOverlay({ mod: "worktree", kind: "dialog", ...size, props: { folder: p.path, machine: null, action } });
   }
 
   gitOp(cx, p, op) {
@@ -603,10 +648,9 @@ export default class ProjectTiles extends View {
     else if (key === "/") this.startSearch();
     else if (key === "o" && p) this.open(p, "new", d.pres);
     else if (key === "t" && p) this.open(p, "tab", d.pres);
-    else if (key === "w" && p) {
-      if (this.meta[p.id]?.git) this.worktree(p);
-      else this.say("not a git repository", true);
-    } else if (key === "a") {
+    else if (key === "w" && p) this.worktree(p, "new");
+    else if (key === "W" && p) this.worktree(p, "open");
+    else if (key === "a") {
       const cwd = focused()?.cwd;
       if (cwd) this.addPath(cx, cwd, this.collectionOf(cur));
       else this.say("no current folder — use A", true);
@@ -684,23 +728,23 @@ export default class ProjectTiles extends View {
 
   /** A footer/header button: primary (accent fill) or secondary (raised). */
   button(t, id, icon, label, primary, onClick) {
-    return h_flex().id(id).flex_none().h(30).px(label ? 12 : 9).gap(7).items_center().rounded(6).cursor_pointer()
+    return h_flex().id(id).flex_none().h(26).px(label ? 9 : 7).gap(5).items_center().rounded(6).cursor_pointer()
       .bg(primary ? t.accent : t.raised)
       .text_color(primary ? t.accent_foreground : t.foreground)
       .hover((s) => s.opacity(0.85))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => onClick(cx))
-      .when(Boolean(icon), (el) => el.child(this.icon(icon, 14, primary ? t.accent_foreground : t.muted)))
-      .when(Boolean(label), (el) => el.child(div().text_size(12.5).font_medium().whitespace_nowrap().child(label)));
+      .when(Boolean(icon), (el) => el.child(this.icon(icon, 13, primary ? t.accent_foreground : t.muted)))
+      .when(Boolean(label), (el) => el.child(div().text_size(12).font_medium().whitespace_nowrap().child(label)));
   }
 
   iconButton(t, id, icon, label, color, onClick) {
-    return h_flex().id(id).flex_none().h(28).px(6).gap(3).items_center().rounded(6).cursor_pointer()
+    return h_flex().id(id).flex_none().h(24).px(5).gap(3).items_center().rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => onClick(cx))
-      .child(this.icon(icon, 15, color))
-      .when(Boolean(label), (el) => el.child(div().text_size(12).font_medium().text_color(color).child(label)));
+      .child(this.icon(icon, 13, color))
+      .when(Boolean(label), (el) => el.child(div().text_size(11.5).font_medium().text_color(color).child(label)));
   }
 
   pickFolder(cx) {
@@ -719,17 +763,17 @@ export default class ProjectTiles extends View {
     const cur = this.current(d.items);
     this.scroll.scroll_to_item(cur ? cur.row : 0);
 
-    const search = h_flex().id("pt-search").w(380).flex_shrink(1).min_w(160).h(36).px(12).gap(9).items_center().rounded(7)
+    const search = h_flex().id("pt-search").w(300).flex_shrink(1).min_w(140).h(28).px(9).gap(7).items_center().rounded(6)
       .bg(t.raised).border_1().border_color(this.search ? t.accent : t.raised).cursor_text()
       .on_click((_e, cx) => { if (!this.search) this.startSearch(); cx.notify(); })
-      .child(this.icon("search", 15, t.dim))
+      .child(this.icon("search", 13, t.dim))
       .child(this.search
-        ? Input.new(this.search).flex_1().h_full().text_size(13).text_color(t.foreground)
-        : div().flex_1().truncate().text_size(13).text_color(this.query ? t.foreground : t.dim).child(this.query || "Search projects…"));
+        ? Input.new(this.search).flex_1().h_full().text_size(12).text_color(t.foreground)
+        : div().flex_1().truncate().text_size(12).text_color(this.query ? t.foreground : t.dim).child(this.query || "Search projects…"));
 
     const busy = this.loading > 0 || this.busy.size > 0;
-    const header = h_flex().flex_none().gap(14).items_center()
-      .child(div().flex_none().text_size(24).font_bold().text_color(t.foreground).child("Projects"))
+    const header = h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border).bg(t.background)
+      .child(div().flex_none().font_semibold().pr(6).text_color(t.foreground).child("Projects"))
       .child(search)
       .child(div().flex_1())
       .child(this.button(t, "pt-add", "plus", "Add current folder", true, (cx) => {
@@ -741,22 +785,22 @@ export default class ProjectTiles extends View {
       .child(this.button(t, "pt-import", "clock", "Add open folders…", false, (cx) => this.importAll(cx)))
       .child(this.button(t, "pt-folder", "folder", "Add folder…", false, (cx) => this.pickFolder(cx)))
       .child(this.button(t, "pt-coll", "plus", "New collection", false, (cx) => { this.collectionForm(null); cx.notify(); }))
-      .child(h_flex().id("pt-refresh").flex_none().size(30).items_center().justify_center().rounded(6).cursor_pointer()
+      .child(h_flex().id("pt-refresh").flex_none().size(26).items_center().justify_center().rounded(6).cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => this.refreshAll(cx))
         .child(busy
-          ? this.icon("spinner", 16, t.working).spin(900)
-          : this.icon("refresh", 16, t.muted)))
-      .child(div().id("pt-esc").flex_none().px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
+          ? this.icon("spinner", 14, t.working).spin(900)
+          : this.icon("refresh", 14, t.muted)))
+      .when(!this.embedded, (el) => el.child(div().id("pt-esc").flex_none().px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click(() => this.close()).child("Esc"));
+        .on_click(() => this.close()).child("Esc")));
 
     const body = this.cat.projects.length ? this.renderRows(t, d, cur) : this.renderEmpty(t);
 
-    const statusLine = h_flex().flex_none().h(18).gap(12).items_center().text_size(11.5)
+    const statusLine = h_flex().flex_none().h(16).gap(12).items_center().text_size(11)
       .child(div().flex_1().truncate()
         .text_color(this.status ? (this.status.err ? t.blocked : t.done) : t.dim)
-        .child(this.status?.text ?? "←↑↓→ move · Enter open · o new space · t tab · e edit · / search · ? keys · Esc close"))
+        .child(this.status?.text ?? `←↑↓→ move · Enter open · o new space · t tab · e edit · / search · ? keys · Esc ${this.embedded ? "back to terminals" : "close"}`))
       .when(Boolean(focused()?.cwd), (el) =>
         el.child(div().flex_none().max_w(420).truncate().text_color(t.dim).child(`here: ${M.shortPath(focused().cwd, this.home)}`)));
 
@@ -770,17 +814,14 @@ export default class ProjectTiles extends View {
           cx.notify();
         }
       })
+      .on_mouse_down("left", () => this.focusSelf())
       .size_full()
       .min_h(0)
-      .px(28)
-      .pt(22)
-      .pb(12)
-      .gap(18)
-      .bg(t.popover)
+      .when(this.embedded, (el) => el.rounded(10).overflow_hidden().border_1().border_color(t.border).bg(t.canvas))
+      .when(!this.embedded, (el) => el.bg(t.popover))
       .text_size(13)
       .child(header)
-      .child(body)
-      .child(statusLine);
+      .child(v_flex().flex_1().min_h(0).px(14).pt(12).pb(8).gap(10).child(body).child(statusLine));
     if (this.help) return root.child(this.renderHelp(t));
     if (this.modal?.kind === "form") return root.child(this.renderForm(t));
     if (this.modal?.kind === "confirm") return root.child(this.renderConfirm(t));
@@ -816,14 +857,14 @@ export default class ProjectTiles extends View {
 
   renderEmpty(t) {
     return v_flex().flex_1().items_center().justify_center().gap(8).text_color(t.muted)
-      .child(div().text_size(17).font_semibold().text_color(t.foreground).child("No projects yet"))
+      .child(div().text_size(13).font_semibold().text_color(t.foreground).child("No projects yet"))
       .child("Add current folder, a folder from the picker, or the folders of open terminals.")
-      .child(div().text_size(12).text_color(t.dim).child("Keys: a — current folder · A — by path · I — import (open terminals + VS Code Project Tiles)"));
+      .child(div().text_size(11).text_color(t.dim).child("Keys: a — current folder · A — by path · I — import (open terminals + VS Code Project Tiles)"));
   }
 
   renderRows(t, d, cur) {
-    const gap = 22;
-    const inner = Math.max(240, this.width - 56 - 8);
+    const gap = 10;
+    const inner = Math.max(240, this.width - 28 - 8);
     const tileW = Math.floor((inner - gap * (d.cols - 1)) / d.cols);
     const children = d.rows.map((r, ri) => {
       if (r.kind === "header") {
@@ -831,8 +872,8 @@ export default class ProjectTiles extends View {
         const sel = cur?.kind === "header" && cur.row === ri;
         const collapsed = c?.collapsed && !this.query;
         const color = c ? M.normalizeHex(c.color ?? "") ?? t.muted : t.dim;
-        return h_flex().id(`pt-h-${r.collection ?? "none"}`).flex_none().gap(10).items_center()
-          .pt(ri ? 14 : 2).pb(10).px(4).border_b(1).border_color(sel ? t.accent : t.border)
+        return h_flex().id(`pt-h-${r.collection ?? "none"}`).flex_none().gap(8).items_center()
+          .pt(ri ? 10 : 0).pb(6).px(2).border_b(1).border_color(sel ? t.accent : t.border)
           .cursor_pointer()
           .on_click((_e, cx) => {
             const i = d.items.findIndex((it) => it.kind === "header" && it.row === ri);
@@ -840,19 +881,19 @@ export default class ProjectTiles extends View {
             if (c) this.toggleCollapse(cx, c.id);
             cx.notify();
           })
-          .child(div().size(14).rounded_full().bg(color))
-          .child(div().text_size(17).font_semibold().text_color(sel ? t.accent : t.foreground).child(c?.name ?? "No collection"))
-          .when(Boolean(c), (el) => el.child(this.icon(collapsed ? "chevron-right" : "chevron-down", 15, t.muted)))
-          .child(div().px(9).py(1).rounded_full().bg(t.raised).text_size(11.5).font_medium().text_color(t.muted).child(String(r.count)))
-          .when(Boolean(c?.description), (el) => el.child(div().truncate().text_size(12).text_color(t.dim).child(c.description)));
+          .child(div().size(8).rounded(4).bg(color))
+          .child(div().text_size(12.5).font_semibold().text_color(sel ? t.accent : t.foreground).child(c?.name ?? "No collection"))
+          .when(Boolean(c), (el) => el.child(this.icon(collapsed ? "chevron-right" : "chevron-down", 12, t.dim)))
+          .child(div().text_size(11).text_color(t.dim).child(String(r.count)))
+          .when(Boolean(c?.description), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(c.description)));
       }
       if (r.kind === "empty") {
-        return div().px(6).py(6).text_size(12).text_color(t.dim).child("Empty — press m on a project to move it here.");
+        return div().p(10).text_size(11.5).text_color(t.dim).child("Empty — press m on a project to move it here.");
       }
       return h_flex().flex_none().gap(gap).items_stretch().children(r.ids.map((id) =>
         this.renderTile(t, this.project(id), tileW, cur?.kind === "tile" && cur.id === id, d)));
     });
-    return v_flex().id("pt-list").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).gap(20).pr(8).pb(8).children(children);
+    return v_flex().id("pt-list").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).gap(10).pr(4).pb(4).children(children);
   }
 
   renderTile(t, p, w, sel, d) {
@@ -867,106 +908,122 @@ export default class ProjectTiles extends View {
       M.normalizeHex(this.cat.collections.find((c) => c.id === p.collectionId)?.color ?? "");
     const color = own ?? t.accent;
     const mode = this.settings.open_mode === "tab" ? "tab" : "space";
-    const mono = "JetBrains Mono";
-    const logoSize = compact ? 40 : 56;
+        const logoSize = compact ? 30 : 38;
 
     // Top-right pills: where it is open, agents, availability.
     const pills = [];
-    const pill = (text, fg, bg) => div().flex_none().px(9).h(22).rounded(11).bg(bg).items_center().flex()
-      .text_size(11.5).font_medium().text_color(fg).child(text);
+    const pill = (text, fg, bg) => div().flex_none().px(7).h(18).rounded(9).bg(bg).items_center().flex()
+      .text_size(11).font_medium().text_color(fg).child(text);
     if (avail === "offline") pills.push(pill("offline", t.muted, t.raised));
     else if (avail) pills.push(pill("missing", t.blocked, t.raised));
     else {
       if (here) pills.push(pill("currently open", t.muted, t.raised));
       else if (pres.spaces.length) pills.push(pill(`open · space ${pres.spaces.map((x) => x.index).join(", ")}`, t.muted, t.raised));
-      if (pres.working) pills.push(h_flex().flex_none().gap(4).px(8).h(22).rounded(11).bg(t.raised).items_center()
-        .child(this.icon("spinner", 11, t.working).spin(900)).child(div().text_size(11.5).text_color(t.working).child(String(pres.working))));
+      if (pres.working) pills.push(h_flex().flex_none().gap(4).px(7).h(18).rounded(9).bg(t.raised).items_center()
+        .child(this.icon("spinner", 11, t.working).spin(900)).child(div().text_size(11).text_color(t.working).child(String(pres.working))));
       if (pres.blocked) pills.push(pill(`● ${pres.blocked} blocked`, t.blocked, t.raised));
       if (pres.done) pills.push(pill(`● ${pres.done} done`, t.done, t.raised));
     }
 
     const emoji = M.emojiOf(p);
-    const logo = h_flex().flex_none().size(logoSize).rounded(compact ? 8 : 11).items_center().justify_center()
+    const logo = h_flex().flex_none().size(logoSize).rounded(compact ? 6 : 8).items_center().justify_center()
       .bg(emoji ? t.raised : color)
       .child(emoji
-        ? div().text_size(compact ? 20 : 26).child(M.clampGraphemes(emoji, 3))
-        : div().text_size(compact ? 16 : 22).font_bold().text_color("#ffffff").child(M.initials(p.name)));
+        ? div().text_size(compact ? 16 : 19).child(M.clampGraphemes(emoji, 3))
+        : div().text_size(compact ? 11.5 : 13).font_semibold().text_color("#ffffff").child(M.initials(p.name)));
 
-    const head = h_flex().gap(16).items_center()
+    const head = h_flex().gap(10).items_center()
       .child(logo)
-      .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().truncate().text_size(compact ? 15 : 18).font_semibold().text_color(t.foreground).child(p.name))
+      .child(v_flex().flex_1().min_w(0).gap(1)
+        .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(p.name))
         .when((compact || s.show_path) && M.shown(p, "path", s), (el) => el.child(
-          div().truncate().text_ellipsis_start().font_family(mono).text_size(12).text_color(t.muted).child(p.path))));
+          div().truncate().text_ellipsis_start().text_size(11).text_color(t.dim).child(p.path))));
 
     const lines = [];
     if (!compact && s.show_description && M.shown(p, "description", s) && p.description) {
-      lines.push(div().truncate().text_size(12.5).text_color(t.muted).child(p.description));
+      lines.push(div().truncate().text_size(12).text_color(t.muted).child(p.description));
     }
     if (!compact && s.show_languages && M.shown(p, "languages", s) && !avail) {
       const langs = M.languagesOf(p, m).map((l) => ({ ...l, color: l.color ?? t.dim }));
       if (langs.length) {
-        const barW = w - 2 * 22;
-        lines.push(h_flex().h(7).w(barW).rounded(4).overflow_hidden().bg(t.raised).children(langs.map((l, i) =>
+        const barW = w - 2 * 14;
+        lines.push(h_flex().h(5).w(barW).rounded(3).overflow_hidden().bg(t.raised).children(langs.map((l, i) =>
           i === langs.length - 1
             ? div().h_full().flex_1().bg(l.color)
             : div().h_full().flex_none().w(Math.max(2, Math.round((barW * l.pct) / 100))).bg(l.color))));
-        lines.push(h_flex().flex_wrap().gap_x(16).gap_y(6).items_center().children(langs.slice(0, 6).map((l) =>
-          h_flex().flex_none().gap(7).items_center()
-            .child(div().size(9).rounded_full().bg(l.color))
-            .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(l.name))
-            .child(div().text_size(12.5).text_color(t.muted).child(M.pct(l.pct))))));
+        lines.push(h_flex().flex_wrap().gap_x(12).gap_y(3).items_center().children(langs.slice(0, 6).map((l) =>
+          h_flex().flex_none().gap(5).items_center()
+            .child(div().size(7).rounded_full().bg(l.color))
+            .child(div().text_size(11.5).font_medium().text_color(t.foreground).child(l.name))
+            .child(div().text_size(11.5).text_color(t.dim).child(M.pct(l.pct))))));
       } else if (m.languages_scanned) {
-        lines.push(div().text_size(12.5).text_color(t.muted).child("no languages detected"));
+        lines.push(div().text_size(11.5).text_color(t.dim).child("no languages detected"));
       }
     }
     if (s.show_git && M.shown(p, "git", s) && !avail) {
       const g = m.git;
       if (!m.git_checked) {
-        lines.push(div().h(24).text_size(12).text_color(t.dim).child(busy ? "reading git…" : ""));
+        lines.push(div().h(20).text_size(11.5).text_color(t.dim).child(busy ? "reading git…" : ""));
       } else if (!g) {
-        lines.push(div().h(24).text_size(12).text_color(t.dim).child("not a git repository"));
+        lines.push(div().h(20).text_size(11.5).text_color(t.dim).child("not a git repository"));
       } else {
         const tone = { orange: t.ansi3, blue: t.ansi4, green: t.done, dim: t.muted };
-        lines.push(h_flex().h(26).gap(9).items_center()
-          .child(this.icon("branch", 15, t.muted))
-          .child(h_flex().min_w(0).flex_shrink(1).px(10).h(24).rounded(12).bg(t.raised).items_center()
-            .child(div().truncate().text_size(12.5).font_medium().text_color(t.foreground).child(g.branch)))
-          .when(g.dirty > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.working).child(`● ${g.dirty}`)))
+        // Web pages on the remote (GitLab / GitHub / Bitbucket): the branch, else the repository.
+        const links = m.links ?? {};
+        const branchUrl = links.branch ?? links.repo ?? null;
+        lines.push(h_flex().h(20).gap(7).items_center()
+          .child(this.icon("branch", 13, t.dim))
+          .child(h_flex().id(`pt-br-${p.id}`).min_w(0).flex_shrink(1).px(7).h(18).rounded(9).bg(t.raised).items_center()
+            .when(Boolean(branchUrl), (el) => el.cursor_pointer().hover((st) => st.bg(t.hover))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(branchUrl); }))
+            .child(div().truncate().text_size(11.5).font_medium().text_color(t.foreground).child(g.branch)))
+          .when(g.dirty > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.working).child(`● ${g.dirty}`)))
+          .when((g.worktrees?.length ?? 0) > 0, (el) => el.child(h_flex().id(`pt-wt-${p.id}`).flex_none().gap(3).px(6).h(18).rounded(9)
+            .items_center().cursor_pointer().hover((st) => st.bg(t.hover))
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => { cx.stop_propagation(); this.worktree(p, "open"); })
+            .child(this.icon("worktree", 11, t.muted))
+            .child(div().text_size(11).text_color(t.muted).child(String(g.worktrees.length)))))
           .child(div().flex_1())
-          .children(M.gitPills(g).map((x) => h_flex().flex_none().gap(5).px(10).h(24).rounded(12).items_center()
+          .children(M.gitPills(g).map((x) => h_flex().flex_none().gap(4).px(7).h(18).rounded(9).items_center()
             .bg(x.tone === "dim" ? t.raised : t.raised)
-            .when(Boolean(x.icon), (el) => el.child(this.icon(x.icon, 13, tone[x.tone])))
-            .child(div().text_size(12).font_medium().text_color(tone[x.tone]).child(x.text)))));
+            .when(Boolean(x.icon), (el) => el.child(this.icon(x.icon, 11, tone[x.tone])))
+            .child(div().text_size(11).font_medium().text_color(tone[x.tone]).child(x.text)))));
         if (!compact && g.commit) {
           const c = g.commit;
-          lines.push(h_flex().h(20).gap(9).items_center()
-            .child(this.icon("commit", 15, t.muted))
-            .child(div().flex_none().font_family(mono).text_size(12).text_color(t.ansi4).child(c.hash))
-            .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(c.subject))
-            .child(div().flex_none().text_size(12).text_color(t.muted).child(M.ago(c.date))));
+          lines.push(h_flex().h(16).gap(7).items_center()
+            .child(this.icon("commit", 13, t.dim))
+            .child(div().id(`pt-c-${p.id}`).flex_none().text_size(11.5).text_color(t.ansi4)
+              .when(Boolean(links.commit), (el) => el.cursor_pointer().hover((st) => st.underline())
+                .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(links.commit); }))
+              .child(c.hash))
+            .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(c.subject))
+            .child(div().flex_none().text_size(11).text_color(t.dim).child(M.ago(c.date))));
         }
       }
     }
 
     const g = m.git;
-    const footer = h_flex().flex_none().px(22).py(12).gap(8).items_center().border_t(1).border_color(t.border)
-      // Labels as room allows (the git icons on the right always fit).
-      .child(this.button(t, `pt-open-${p.id}`, "window", w >= 260 ? (pres.spaces.length && mode === "space" ? "Go to space" : "Open") : "", true,
+    const footer = h_flex().flex_none().px(14).py(8).gap(6).items_center().border_t(1).border_color(t.border)
+      // Open = the project's space (or a new one); New tab = here, in the current space.
+      // A second space for an open project stays on the "o" key.
+      .child(this.button(t, `pt-open-${p.id}`, "window", pres.spaces.length && mode === "space" ? "Go to space" : "Open", true,
         () => this.open(p, mode, d.pres)))
-      .child(this.button(t, `pt-new-${p.id}`, "external", w >= 400 ? "New space" : "", false, () => this.open(p, "new", d.pres)))
-      .child(this.button(t, `pt-tab-${p.id}`, "terminal", w >= 500 ? "New tab" : "", false, () => this.open(p, "tab", d.pres)))
+      .child(this.button(t, `pt-tab-${p.id}`, "terminal", w >= 300 ? "New tab" : "", false, () => this.open(p, "tab", d.pres)))
+      .when(Boolean(g), (el) => el.child(this.button(t, `pt-wt-new-${p.id}`, "worktree", w >= 400 ? "Worktree" : "", false, () => this.worktree(p, "new"))))
       .child(div().flex_1().min_w(4))
       .when(Boolean(g), (el) => el
         .child(this.iconButton(t, `pt-r-${p.id}`, busy ? "spinner" : "refresh", "", t.muted, (cx) => this.gitOp(cx, p, "fetch")))
         .child(this.iconButton(t, `pt-pull-${p.id}`, "down", g?.behind ? String(g.behind) : "", g?.behind ? t.ansi4 : t.muted, (cx) => this.gitOp(cx, p, "pull")))
         .child(this.iconButton(t, `pt-push-${p.id}`, "up", g?.ahead ? String(g.ahead) : "", g?.ahead ? t.ansi4 : t.muted, (cx) => this.gitOp(cx, p, "push"))));
 
-    return v_flex().id(`pt-t-${p.id}`).w(w).flex_none().rounded(12).overflow_hidden()
+    return v_flex().id(`pt-t-${p.id}`).w(w).flex_none().rounded(8).overflow_hidden()
       .border_1().border_color(sel ? t.accent : avail === "deleted" ? t.blocked : t.border)
       .when(sel, (el) => el.border_2())
       .when(avail === "offline", (el) => el.border_dashed().opacity(0.6))
-      .bg(t.surface)
+      .bg(t.background)
       .on_click((e, cx) => {
         const i = d.items.findIndex((it) => it.kind === "tile" && it.id === p.id);
         if (i >= 0) this.at = i;
@@ -974,7 +1031,7 @@ export default class ProjectTiles extends View {
         this.focusSelf();
         cx.notify();
       })
-      .child(v_flex().flex_1().px(22).pt(20).pb(16).gap(14)
+      .child(v_flex().flex_1().px(14).pt(12).pb(10).gap(8)
         .child(h_flex().items_start().gap(8)
           .child(div().flex_1().min_w(0).child(head))
           .child(h_flex().flex_none().gap(6).items_center().children(pills)))

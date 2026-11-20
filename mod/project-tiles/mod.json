@@ -1,1 +1,1 @@
-{ "place": "none", "title": "Project Tiles", "overlay": { "kind": "dialog", "width": 0.92, "height": 0.9 } }
+{ "place": "none", "title": "Project Tiles", "focusable": true, "overlay": { "kind": "dialog", "width": 0.92, "height": 0.9 } }

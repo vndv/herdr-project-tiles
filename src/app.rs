@@ -63,6 +63,7 @@ pub fn meta_json(m: &Meta) -> Value {
         "fetched_at": m.fetched_at,
         "languages_at": m.languages_at,
         "git_token": crate::presence::git_token(m),
+        "links": m.git.as_ref().map(git::links),
     })
 }
 

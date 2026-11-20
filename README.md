@@ -29,11 +29,21 @@ catalog, settings and cache with the TUI plugin and uses this binary as its back
     herdr-app check ~/.config/herdr-app/mods/project-tiles
     node mod/test.mjs   # tests for the mod's pure logic
 
+As a tab: put the mod in a layout block with `"props": {"embedded": true}` (here: the
+`command-center` layout's `center` stack, after `board`, with a "Projects" segment in the
+`cc-tabs` bar and `cmd-alt-p` / `cmd-alt-3` bound to `cc-tabs.projects`). Embedded, it never
+takes the keyboard on start; the tab bar sends it `project-tiles.focus` when it is shown, and
+Esc or opening a project goes back to Terminals. Without a block it still opens as a dialog
+(`mod.open:project-tiles`).
+
 The mod runs programs: this binary (git read-only and fetch/pull/push in project folders) and
 `open` for Reveal in Finder. Enter selects the space showing the project (`space.select`) or
 creates one (`space.new {folder, name}`); `t` is `tab.new`, `w` opens Herdr's worktree dialog.
 Marks are live from `spaces()`/`panes()`: `◆ N` spaces showing the project, `● here`, agents
 working/blocked/done. Git errors are Herdr toasts (`notify`).
+Clicking a tile's branch opens it on the remote's web page (GitLab `/-/tree/`, GitHub `/tree/`,
+Bitbucket `/src/`; the repository when the branch is not pushed under its own name), clicking the
+commit hash opens the commit. The address comes from `git remote get-url` (no network).
 
 ## Install (herdr TUI plugin)
 

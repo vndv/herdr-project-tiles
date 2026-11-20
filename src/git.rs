@@ -156,6 +156,10 @@ pub struct GitInfo {
     /// The counts reflect a fresh `git fetch` (otherwise they are "stale").
     pub fetched: bool,
     pub commit: Option<Commit>,
+    /// The remote's URL as git has it (the upstream's remote, else origin).
+    pub remote_url: Option<String>,
+    /// Linked worktree checkouts (not the main one), from `git worktree list`.
+    pub worktrees: Vec<String>,
 }
 
 pub fn is_repo(path: &str) -> bool {
@@ -206,6 +210,16 @@ pub fn parse_ahead_behind(s: &str) -> Option<(u32, u32)> {
         return None;
     }
     Some((a, b))
+}
+
+/// `git worktree list --porcelain` → the linked checkouts (the first entry is the main one).
+pub fn parse_worktrees(s: &str) -> Vec<String> {
+    s.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .skip(1)
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// `git status --porcelain` → (changed, untracked).
@@ -286,6 +300,25 @@ pub fn info(path: &str, fetch: bool) -> Option<GitInfo> {
     if o.ok() {
         (g.dirty, g.untracked) = parse_porcelain(&o.stdout);
     }
+    // The web links need the remote's address: the upstream's remote, else origin. Local only.
+    let remote = g
+        .upstream
+        .as_deref()
+        .and_then(|u| u.split_once('/'))
+        .map(|(r, _)| r.to_string())
+        .unwrap_or_else(|| "origin".into());
+    let o = run(path, &["remote", "get-url", &remote], QUICK, true);
+    if o.ok() && !o.stdout.trim().is_empty() {
+        g.remote_url = Some(o.stdout.trim().to_string());
+    }
+    let o = run(path, &["worktree", "list", "--porcelain"], QUICK, true);
+    if o.ok() {
+        // Stale entries (folder gone, not yet pruned) are left out.
+        g.worktrees = parse_worktrees(&o.stdout)
+            .into_iter()
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .collect();
+    }
     g.fetched = fetched;
     Some(g)
 }
@@ -319,6 +352,98 @@ pub fn remote(path: &str, op: RemoteOp) -> Output {
     run(path, op.args(), REMOTE, false)
 }
 
+/// `git@host:group/repo.git`, `ssh://git@host:22/group/repo.git` or
+/// `https://user@host/group/repo.git` → `https://host/group/repo`. `None` for local paths.
+pub fn web_url(remote: &str) -> Option<String> {
+    let r = remote.trim();
+    let (host, path) = if let Some(rest) = r
+        .strip_prefix("https://")
+        .or_else(|| r.strip_prefix("http://"))
+    {
+        let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+        rest.split_once('/')?
+    } else if let Some(rest) = r
+        .strip_prefix("ssh://")
+        .or_else(|| r.strip_prefix("git+ssh://"))
+    {
+        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
+        let (hostport, path) = rest.split_once('/')?;
+        (hostport.split(':').next().unwrap_or(hostport), path)
+    } else if !r.contains("://") && r.contains(':') && !r.starts_with('/') {
+        let rest = r.split_once('@').map(|(_, h)| h).unwrap_or(r);
+        rest.split_once(':')?
+    } else {
+        return None;
+    };
+    let path = path
+        .trim_matches('/')
+        .trim_end_matches(".git")
+        .trim_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("https://{host}/{path}"))
+}
+
+fn encode_path(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Links {
+    pub repo: Option<String>,
+    /// The branch on the remote; `None` when it is not pushed (no upstream) or HEAD is detached.
+    pub branch: Option<String>,
+    pub commit: Option<String>,
+}
+
+/// Web links for a repository: GitHub and Bitbucket path styles, GitLab's for everything else.
+pub fn links(g: &GitInfo) -> Links {
+    let Some(repo) = g.remote_url.as_deref().and_then(web_url) else {
+        return Links::default();
+    };
+    let host = repo
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let (tree, commit) = if host == "github.com" {
+        ("/tree/", "/commit/")
+    } else if host == "bitbucket.org" {
+        ("/src/", "/commits/")
+    } else {
+        ("/-/tree/", "/-/commit/")
+    };
+    // The branch as the remote knows it: the upstream's name without its remote.
+    let branch = g
+        .upstream
+        .as_deref()
+        .and_then(|u| u.split_once('/'))
+        .map(|(_, b)| b)
+        // A local branch tracking another name (refactor/x → origin/main) is not on the remote as itself.
+        .filter(|b| !g.detached && *b == g.branch)
+        .map(|b| format!("{repo}{tree}{}", encode_path(b)));
+    let commit = g
+        .commit
+        .as_ref()
+        .map(|c| format!("{repo}{commit}{}", c.hash));
+    Links {
+        repo: Some(repo),
+        branch,
+        commit,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +461,68 @@ mod tests {
         assert_eq!(parse_ahead_behind("1"), None);
         assert_eq!(parse_porcelain(" M a\n?? b\nA  c\n?? d\n"), (2, 2));
         assert_eq!(parse_porcelain(""), (0, 0));
+        let wt = "worktree /r/main\nHEAD abc\nbranch refs/heads/main\n\nworktree /w/r/fix-x\nHEAD def\nbranch refs/heads/fix/x\n\nworktree /w/r/det\nHEAD 123\ndetached\n";
+        assert_eq!(parse_worktrees(wt), vec!["/w/r/fix-x", "/w/r/det"]);
+        assert!(parse_worktrees("worktree /only/main\nHEAD a\n").is_empty());
+    }
+
+    #[test]
+    fn web_links() {
+        assert_eq!(
+            web_url("git@gitlab.contoso.io:data/dbt-project.git").as_deref(),
+            Some("https://gitlab.contoso.io/data/dbt-project")
+        );
+        assert_eq!(
+            web_url("ssh://git@gitlab.example.com:2222/a/b/c.git").as_deref(),
+            Some("https://gitlab.example.com/a/b/c")
+        );
+        assert_eq!(
+            web_url("https://user:tok@github.com/o/r.git").as_deref(),
+            Some("https://github.com/o/r")
+        );
+        assert_eq!(
+            web_url("git@bitbucket.org:contoso/x.git").as_deref(),
+            Some("https://bitbucket.org/contoso/x")
+        );
+        assert_eq!(web_url("/srv/git/repo.git"), None);
+        assert_eq!(web_url("file:///srv/repo"), None);
+        let mut g = GitInfo {
+            branch: "feat/TASK-1 x".into(),
+            upstream: Some("origin/feat/TASK-1 x".into()),
+            remote_url: Some("git@gitlab.contoso.io:data/dbt.git".into()),
+            commit: Some(Commit {
+                hash: "abc1234".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let l = links(&g);
+        assert_eq!(
+            l.branch.as_deref(),
+            Some("https://gitlab.contoso.io/data/dbt/-/tree/feat/TASK-1%20x")
+        );
+        assert_eq!(
+            l.commit.as_deref(),
+            Some("https://gitlab.contoso.io/data/dbt/-/commit/abc1234")
+        );
+        g.remote_url = Some("git@github.com:o/r.git".into());
+        assert_eq!(
+            links(&g).branch.as_deref(),
+            Some("https://github.com/o/r/tree/feat/TASK-1%20x")
+        );
+        g.remote_url = Some("git@bitbucket.org:o/r.git".into());
+        assert_eq!(
+            links(&g).commit.as_deref(),
+            Some("https://bitbucket.org/o/r/commits/abc1234")
+        );
+        g.upstream = Some("origin/main".into()); // tracks another branch: no branch page
+        assert_eq!(links(&g).branch, None);
+        g.upstream = None; // not pushed: no branch page, the repo still opens
+        let l = links(&g);
+        assert_eq!(l.branch, None);
+        assert_eq!(l.repo.as_deref(), Some("https://bitbucket.org/o/r"));
+        g.remote_url = None;
+        assert_eq!(links(&g), Links::default());
     }
 
     #[test]

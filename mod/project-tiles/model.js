@@ -275,20 +275,35 @@ export function nav(items, at, dx, dy) {
 
 // ---------------------------------------------------------------- herdr presence
 
-/** The deepest catalog project containing `cwd`. */
-export function projectForCwd(cat, cwd) {
+/** The catalog project containing `cwd`: in its folder or one of its linked worktrees
+ *  (`extra`: {projectId: [paths]}); the deepest match wins. */
+export function projectForCwd(cat, cwd, extra = {}) {
   let best = null;
+  let depth = -1;
   for (const p of cat.projects) {
-    if (within(cwd, p.path) && (!best || norm(p.path).length > norm(best.path).length)) best = p;
+    for (const root of [p.path, ...(extra[p.id] ?? [])]) {
+      const d = norm(root).length;
+      if (within(cwd, root) && d > depth) {
+        best = p;
+        depth = d;
+      }
+    }
   }
   return best;
+}
+
+/** {projectId: [linked worktree paths]} from the metadata. */
+export function worktreeRoots(meta) {
+  const out = {};
+  for (const [id, m] of Object.entries(meta ?? {})) if (m?.git?.worktrees?.length) out[id] = m.git.worktrees;
+  return out;
 }
 
 /**
  * Per project id: {spaces: [{id, index, name}], working, blocked, done}.
  * spaces: SpaceInfo[] (local ones), panes: PaneInfo[].
  */
-export function presence(cat, spaces, panes) {
+export function presence(cat, spaces, panes, extra = {}) {
   const spaceOfTab = new Map();
   for (const s of spaces) for (const t of s.tabs ?? []) spaceOfTab.set(t.id, s);
   const out = {};
@@ -297,7 +312,7 @@ export function presence(cat, spaces, panes) {
     if (!pane.cwd) continue;
     const s = spaceOfTab.get(pane.tab);
     if (!s || s.machine) continue;
-    const p = projectForCwd(cat, pane.cwd);
+    const p = projectForCwd(cat, pane.cwd, extra);
     if (!p) continue;
     const e = get(p.id);
     if (!e.spaces.some((x) => x.id === s.id)) e.spaces.push({ id: s.id, index: s.index, name: s.name, active: s.active });

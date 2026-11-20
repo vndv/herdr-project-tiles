@@ -122,6 +122,14 @@ t("presence", () => {
   assert.equal(pr.b.done, 1);
   assert.deepEqual(m.openFolders(spaces, panes), ["/srv/shop/src", "/srv/shop", "/srv/shop/crabs/x"]);
   assert.equal(m.projectForCwd(c, "/srv/shop/crabs/q").id, "b");
+  // A linked worktree outside the project folder counts for its project.
+  const extra = m.worktreeRoots({ c: { git: { worktrees: ["/wt/loose/fix-x"] } }, a: { git: {} } });
+  assert.deepEqual(extra, { c: ["/wt/loose/fix-x"] });
+  assert.equal(m.projectForCwd(c, "/wt/loose/fix-x/src", extra).id, "c");
+  const pr2 = m.presence(c, [{ id: "s9", index: 9, name: "fix-x", machine: null, tabs: [{ id: "t9" }] }],
+    [{ tab: "t9", cwd: "/wt/loose/fix-x", status: "working" }], extra);
+  assert.deepEqual(pr2.c.spaces.map((s) => s.index), [9]);
+  assert.equal(pr2.c.working, 1);
 });
 
 t("labels and git badges", () => {
