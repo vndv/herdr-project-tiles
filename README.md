@@ -97,7 +97,10 @@ NDJSON socket server.
 
 ## Rollback
 
-The Python version (`tiles.py`, `bin/run.sh`) is still in the folder. To go back, restore its
-manifest — `cp herdr-plugin.toml.bak-20261120-python herdr-plugin.toml` — herdr re-reads the
-manifest. The config change is undone with
+The Python version is in git history (commit `645aedc`). To go back:
+
+    git checkout 645aedc -- tiles.py bin/run.sh herdr-plugin.toml.bak-20261120-python
+    cp herdr-plugin.toml.bak-20261120-python herdr-plugin.toml
+
+herdr re-reads the manifest. The config change is undone with
 `cp ~/.config/herdr/config.toml.bak-20261120-sidebar-toast ~/.config/herdr/config.toml`.
