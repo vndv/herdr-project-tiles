@@ -2,11 +2,17 @@
 
 A tile dashboard of projects for [herdr](https://herdr.dev), modelled on
 [InvisibleF0x/project-tiles](https://github.com/InvisibleF0x/project-tiles) for VS Code.
-It is a herdr plugin: one Rust binary (ratatui + crossterm) shown in an overlay pane,
-talking to herdr through its socket API.
+One Rust binary serves two hosts:
+
+- **Herdr.app** (the desktop app): a mod in `herdr-app/mods/project-tiles/`, listed in the
+  [Herdr mods gallery](https://herdr.dev/mods). The binary is its backend.
+- **herdr TUI** (0.9.5+): a plugin, shown in an overlay pane and talking to herdr through its
+  socket API.
+
+![Project Tiles](herdr-app/preview.png)
 
 Each tile shows the name, a logo (emoji or initials), the path, a description, a language bar,
-the git branch, ahead/behind (grey "stale" until a fresh fetch), changed/untracked counts and
+the git branch, ahead/behind (grey "no fetch" until a fresh fetch), changed/untracked counts and
 the last commit. Live from herdr (event subscriptions, no polling):
 
 - `● here` — the project you are in; `◆ 1,3` — workspaces the project is open in;
@@ -17,17 +23,31 @@ Projects can be grouped into collapsible coloured collections, reordered and sea
 
 ## Herdr.app (desktop) mod
 
-The desktop Herdr.app does not load TUI plugins; it has its own mods. `mod/project-tiles/` is the
-same dashboard as a Herdr.app mod (GPUI), opened as a dialog with `cmd-alt-p`
-(`"cmd-alt-p": "mod.open:project-tiles"` in `~/.config/herdr-app/keys.json`). It shares the
-catalog, settings and cache with the TUI plugin and uses this binary as its backend
-(`project-tiles app paths | meta | git | resolve | import`, JSON on stdout), so build first:
+1. Install the backend (needs a Rust toolchain; macOS or Linux):
 
-    cargo build --release --locked
-    mkdir -p ~/.config/herdr-app/mods/project-tiles
-    cp -R mod/project-tiles/{main.js,model.js,mod.json,icons} ~/.config/herdr-app/mods/project-tiles/
-    herdr-app check ~/.config/herdr-app/mods/project-tiles
-    node mod/test.mjs   # tests for the mod's pure logic
+       cargo install --locked --git https://github.com/vndv/herdr-project-tiles
+
+   The mod looks for `project-tiles` on PATH, in `~/.cargo/bin`, `~/.local/bin` and Homebrew's
+   bin; a layout block can point elsewhere with `"props": {"bin": "/path/to/project-tiles"}`.
+2. Add the mod: tell Herdr's agent *"Read ~/.config/herdr-app/AGENTS.md, then add this mod:
+   herdr.dev/mods/vndv/herdr-project-tiles"*, or by hand:
+
+       git clone https://github.com/vndv/herdr-project-tiles && cd herdr-project-tiles
+       cp -R herdr-app/mods/project-tiles ~/.config/herdr-app/mods/
+       herdr-app check ~/.config/herdr-app/mods/project-tiles
+
+3. Bind a key in `~/.config/herdr-app/keys.json` (see `herdr-app/keys.json`):
+   `"cmd-alt-p": "mod.open:project-tiles"`.
+
+`herdr-app/RECIPE.md` describes the mod in full (what it shows, keys, what it runs). It shares
+the catalog, settings and cache with the TUI plugin; the backend speaks JSON on stdout
+(`project-tiles app paths | meta | git | resolve | import`).
+
+**What it runs and touches:** the `project-tiles` binary, which runs `git` in your project
+folders (status read-only and without hooks; fetch, pull, push when you ask, plus a background
+`git fetch` for repos with an upstream — turn it off with `"fetch_remote": false` in
+`settings.json`), and `open` for links and Finder. It reads and writes its catalog, settings
+and cache (see [Files](#files)); nothing else, no network besides git.
 
 As a tab: put the mod in a layout block with `"props": {"embedded": true}` (here: the
 `command-center` layout's `center` stack, after `board`, with a "Projects" segment in the
@@ -51,7 +71,7 @@ or a click on the changed-files count opens gitview for the project (in its spac
 ## Install (herdr TUI plugin)
 
     cargo build --release --locked
-    herdr plugin link ~/Documents/programming/herdr-project-tiles
+    herdr plugin link /path/to/herdr-project-tiles
 
 `plugin link` does not run `[[build]]`; rebuild after changing the code. The manifest is
 re-read by herdr, so a rebuild needs no re-link. Key binding in `~/.config/herdr/config.toml`:
@@ -127,16 +147,12 @@ Read-only calls add `--no-optional-locks -c core.fsmonitor=false -c core.hooksPa
 
     cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
     UPDATE_SNAPSHOTS=1 cargo test   # accept new render snapshots (snapshots/*.txt)
+    node herdr-app/test.mjs          # the mod's pure logic
+    cargo install --locked --path .  # the binary the Herdr.app mod uses
 
 Tests never touch the network: render snapshots use `TestBackend`, the herdr side is a fake
 NDJSON socket server.
 
-## Rollback
+## License
 
-The Python version is in git history (commit `645aedc`). To go back:
-
-    git checkout 645aedc -- tiles.py bin/run.sh herdr-plugin.toml.bak-20261120-python
-    cp herdr-plugin.toml.bak-20261120-python herdr-plugin.toml
-
-herdr re-reads the manifest. The config change is undone with
-`cp ~/.config/herdr/config.toml.bak-20261120-sidebar-toast ~/.config/herdr/config.toml`.
+MIT, see [LICENSE](LICENSE).

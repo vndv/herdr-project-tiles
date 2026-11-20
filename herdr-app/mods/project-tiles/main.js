@@ -3,6 +3,10 @@
 // (mod.open:project-tiles), or embedded in a layout block (props {embedded: true}), e.g. the
 // command-center layout's center stack next to Terminals and Board.
 //
+// Runs programs: the project-tiles binary (found on PATH or in ~/.cargo/bin, ~/.local/bin,
+// Homebrew), which runs git in project folders, and `open` for links and Finder. Reads and
+// writes files outside its folder: the catalog, settings and cache below.
+//
 // Live from Herdr (no polling): which spaces show a project (◆ 1,3), where you are (● here),
 // and the agents working / blocked / done in it. Git and languages come from the
 // project-tiles binary (`project-tiles app meta`), which runs git in the project folder
@@ -19,7 +23,17 @@ import {
 } from "herdr";
 import * as M from "./model.js";
 
-const BIN_REL = "Documents/programming/herdr-project-tiles/target/release/project-tiles";
+// The backend binary (github.com/vndv/herdr-project-tiles). Install it with
+//   cargo install --locked --git https://github.com/vndv/herdr-project-tiles
+// A layout block can point at another build with props {bin: "/path/to/project-tiles"}.
+const REPO = "https://github.com/vndv/herdr-project-tiles";
+const BIN_CANDIDATES = (h) => [
+  "project-tiles", // on PATH (exec uses the user's real environment)
+  `${h}/.cargo/bin/project-tiles`,
+  `${h}/.local/bin/project-tiles`,
+  "/opt/homebrew/bin/project-tiles",
+  "/usr/local/bin/project-tiles",
+];
 
 const HELP = [
   ["←↑↓→ hjkl", "move (mouse: click selects, double-click opens)"],
@@ -49,7 +63,7 @@ export default class ProjectTiles extends View {
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
     this.home = home();
-    this.bin = `${this.home}/${BIN_REL}`;
+    this.bin = null;
     this.paths = null;
     this.cat = M.emptyCatalog();
     this.catText = null;
@@ -122,13 +136,25 @@ export default class ProjectTiles extends View {
     return out;
   }
 
+  /** The first candidate that answers `app paths`; sets this.bin. */
+  async findBackend() {
+    const custom = props()?.bin;
+    for (const bin of [...(custom ? [custom] : []), ...BIN_CANDIDATES(this.home)]) {
+      this.bin = bin;
+      try {
+        return await this.backend(["paths"], 10000);
+      } catch {}
+    }
+    this.bin = null;
+    return null;
+  }
+
   async boot(cx) {
     // gitview (github.com/ChmaraX/herdr-gitview) is optional: its button shows when it is installed.
     this.hasGitview = (await readTextFile(`${appHome()}/mods/gitview-tab/mod.json`).catch(() => null)) !== null;
-    try {
-      this.paths = await this.backend(["paths"]);
-    } catch (e) {
-      this.say(`backend does not start: ${e.message} — build it: cargo build --release`, true);
+    this.paths = await this.findBackend();
+    if (!this.paths) {
+      this.say(`project-tiles backend not found — install it: cargo install --locked --git ${REPO}`, true);
       cx.notify();
       return;
     }

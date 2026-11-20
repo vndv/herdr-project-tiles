@@ -2,6 +2,9 @@
 name = "project-tiles"
 version = "0.2.0"
 edition = "2024"
+description = "Project tiles dashboard for herdr (TUI plugin) and Herdr.app (mod backend)"
+license = "MIT"
+repository = "https://github.com/vndv/herdr-project-tiles"
 
 [dependencies]
 crossterm = "0.29"

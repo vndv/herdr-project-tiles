@@ -1,6 +1,6 @@
-// node mod/test.mjs — tests for the mod's pure logic.
+// node herdr-app/test.mjs — tests for the mod's pure logic.
 import assert from "node:assert/strict";
-import * as m from "./project-tiles/model.js";
+import * as m from "./mods/project-tiles/model.js";
 
 const t = (name, fn) => {
   try {
