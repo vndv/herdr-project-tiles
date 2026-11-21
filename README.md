@@ -1,157 +1,93 @@
-# herdr Project Tiles
+# Project Tiles for Herdr.app
 
-A tile dashboard of projects for [herdr](https://herdr.dev), modelled on
-[InvisibleF0x/project-tiles](https://github.com/InvisibleF0x/project-tiles) for VS Code.
-One Rust binary serves two hosts:
-
-- **Herdr.app** (the desktop app): a mod in `herdr-app/mods/project-tiles/`, listed in the
-  [Herdr mods gallery](https://herdr.dev/mods). The binary is its backend.
-- **herdr TUI** (0.9.5+): a plugin, shown in an overlay pane and talking to herdr through its
-  socket API.
+A tile dashboard of projects for [Herdr.app](https://herdr.dev), the desktop app for terminals
+and coding agents, modelled on [InvisibleF0x/project-tiles](https://github.com/InvisibleF0x/project-tiles)
+for VS Code. It is a mod in `herdr-app/mods/project-tiles/`, listed in the
+[Herdr mods gallery](https://herdr.dev/mods). Plain JavaScript: nothing to build or install
+besides the mod folder.
 
 ![Project Tiles](herdr-app/preview.png)
 
 Each tile shows the name, a logo (emoji or initials), the path, a description, a language bar,
-the git branch, ahead/behind (grey "no fetch" until a fresh fetch), changed/untracked counts and
-the last commit. Live from herdr (event subscriptions, no polling):
+the git branch, ahead/behind (grey "no fetch" until a fresh fetch), changed files, linked
+worktrees and the last commit. Live from Herdr (no polling):
 
-- `● here` — the project you are in; `◆ 1,3` — workspaces the project is open in;
-- agent counts in the project: `●N` working (yellow), blocked (red), done (teal);
+- `currently open` / `open · space N` — the project you are in, the spaces it is open in;
+- agents in the project: working (spinner), blocked (red), done (teal);
 - offline (`/Volumes/...` not mounted: dim, dashed) and deleted folders (red).
 
 Projects can be grouped into collapsible coloured collections, reordered and searched.
+`herdr-app/RECIPE.md` describes the mod in full: what it shows, every key, what it runs.
 
-## Herdr.app (desktop) mod
+## Install
 
-1. Install the backend (needs a Rust toolchain; macOS or Linux):
+Tell Herdr's agent *"Read ~/.config/herdr-app/AGENTS.md, then add this mod:
+herdr.dev/mods/vndv/herdr-project-tiles"*, or by hand:
 
-       cargo install --locked --git https://github.com/vndv/herdr-project-tiles
+    git clone https://github.com/vndv/herdr-project-tiles && cd herdr-project-tiles
+    cp -R herdr-app/mods/project-tiles ~/.config/herdr-app/mods/
+    herdr-app check ~/.config/herdr-app/mods/project-tiles
 
-   The mod looks for `project-tiles` on PATH, in `~/.cargo/bin`, `~/.local/bin` and Homebrew's
-   bin; a layout block can point elsewhere with `"props": {"bin": "/path/to/project-tiles"}`.
-2. Add the mod: tell Herdr's agent *"Read ~/.config/herdr-app/AGENTS.md, then add this mod:
-   herdr.dev/mods/vndv/herdr-project-tiles"*, or by hand:
+Bind a key in `~/.config/herdr-app/keys.json` (see `herdr-app/keys.json`):
+`"cmd-alt-p": "mod.open:project-tiles"`.
 
-       git clone https://github.com/vndv/herdr-project-tiles && cd herdr-project-tiles
-       cp -R herdr-app/mods/project-tiles ~/.config/herdr-app/mods/
-       herdr-app check ~/.config/herdr-app/mods/project-tiles
+Needs `git` and `perl` on the machine the projects live on (macOS and most Linux systems have
+perl). With git older than 2.38 the language bar comes from a folder scan instead of the tracked
+files; without perl, see the timeout note below.
 
-3. Bind a key in `~/.config/herdr-app/keys.json` (see `herdr-app/keys.json`):
-   `"cmd-alt-p": "mod.open:project-tiles"`.
-
-`herdr-app/RECIPE.md` describes the mod in full (what it shows, keys, what it runs). It shares
-the catalog, settings and cache with the TUI plugin; the backend speaks JSON on stdout
-(`project-tiles app paths | meta | git | resolve | import`).
-
-**What it runs and touches:** the `project-tiles` binary, which runs `git` in your project
-folders (status read-only and without hooks; fetch, pull, push when you ask, plus a background
-`git fetch` for repos with an upstream — turn it off with `"fetch_remote": false` in
-`settings.json`), and `open` for links and Finder. It reads and writes its catalog, settings
-and cache (see [Files](#files)); nothing else, no network besides git.
-
-As a tab: put the mod in a layout block with `"props": {"embedded": true}` (here: the
-`command-center` layout's `center` stack, after `board`, with a "Projects" segment in the
-`cc-tabs` bar and `cmd-alt-p` / `cmd-alt-3` bound to `cc-tabs.projects`). Embedded, it never
-takes the keyboard on start; the tab bar sends it `project-tiles.focus` when it is shown, and
-Esc or opening a project goes back to Terminals. Without a block it still opens as a dialog
+As a tab: put the mod in a layout block with `"props": {"embedded": true}`. Embedded, it never
+takes the keyboard on start; a tab bar sends it `project-tiles.focus` when it is shown, and Esc
+or opening a project goes back to the stack's other child. Without a block it opens as a dialog
 (`mod.open:project-tiles`).
 
-The mod runs programs: this binary (git read-only and fetch/pull/push in project folders) and
-`open` for Reveal in Finder. Enter selects the space showing the project (`space.select`) or
-creates one (`space.new {folder, name}`); `t` is `tab.new`, `w` opens Herdr's worktree dialog.
-Marks are live from `spaces()`/`panes()`: `◆ N` spaces showing the project, `● here`, agents
-working/blocked/done. Git errors are Herdr toasts (`notify`).
-Clicking a tile's branch opens it on the remote's web page (GitLab `/-/tree/`, GitHub `/tree/`,
-Bitbucket `/src/`; the repository when the branch is not pushed under its own name), clicking the
-commit hash opens the commit. The address comes from `git remote get-url` (no network); only `https://` addresses with a dotted
-host are built (an ssh alias, a local path or an odd remote gives no link).
-With [herdr-gitview](https://github.com/ChmaraX/herdr-gitview) installed, a tile's ± button, `g`
-or a click on the changed-files count opens gitview for the project (in its space).
+## What it runs and touches
 
-## Install (herdr TUI plugin)
+- `git` in your project folders, through `/usr/bin/env GIT_TERMINAL_PROMPT=0 LC_ALL=C`:
+  - status, branch, upstream, ahead/behind, last commit, remote URL, worktrees, `ls-files` —
+    read-only, with `--no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null
+    -c core.quotepath=off`;
+  - `fetch` in the background for repos with an upstream (20 s limit; turn it off with
+    `"fetch_remote": false` in `settings.json`), and `fetch` / `pull --ff-only` / `push` when you
+    ask (120 s limit). These run with your own config and hooks, so per-folder `includeIf`
+    identities and `core.sshCommand` apply; `GIT_SSH_COMMAND` is never set.
+- `perl`, as a timeout guard for those network calls: Herdr's `exec` stops only the process it
+  started, so git's `ssh` child would outlive a timeout. The guard puts git in its own process
+  group and kills the whole group at the deadline. Whether a machine has perl is asked once
+  (`perl -e 'exit 0'`); on a machine without it git runs directly, and a hanging `ssh` may outlive
+  the timeout there.
+- `sh`, `find`, `wc` — folder checks and the language scan of folders without git.
+- On this computer only: `open` for web links and Finder, `mkdir -p` for the catalog folder.
 
-    cargo build --release --locked
-    herdr plugin link /path/to/herdr-project-tiles
-
-`plugin link` does not run `[[build]]`; rebuild after changing the code. The manifest is
-re-read by herdr, so a rebuild needs no re-link. Key binding in `~/.config/herdr/config.toml`:
-
-    [[keys.command]]
-    key = "prefix+t"
-    type = "plugin_action"
-    command = "vndv.project-tiles.open"
-    description = "project tiles"
-
-## Commands (manifest entrypoints)
-
-| command | used by | does |
-|---|---|---|
-| `project-tiles tui` | pane `tiles` (overlay) | the dashboard |
-| `project-tiles open` | action `open` | `plugin.pane.open` over the socket |
-| `project-tiles add-current` | action `add-current` | adds the focused folder (git root), shows a toast |
-| `project-tiles tag` | `[[startup]]`, event `workspace.created` | Spaces sidebar tokens |
-
-## Keys
-
-Press `?` in the panel.
-
-- `←↑↓→` / `hjkl` move; Enter focuses the workspace the project is open in, or creates one
-  (cwd + label); `o` always opens a new workspace; `t` opens a tab in the current workspace;
-  `w` creates a git worktree workspace (`worktree.create`). The panel closes after opening.
-- `/` search (name, path, description, languages, branch).
-- `a` / `A` / `I` add the current folder, add a folder by path, import (VS Code Project Tiles
-  catalog + folders of open workspaces).
-- `e` edit (form: name, path, description, colour, emoji, languages, collection),
-  `d` remove from the list (the folder is not touched), `m` move to a collection,
-  `n` new collection, `J`/`K` reorder, Space/Enter on a header collapses it.
-- `f` / `p` / `P` git fetch / pull `--ff-only` / push (in the background; errors also as a herdr toast).
-- `r` / `R` refresh one / all, `O` reveal in Finder, `c` compact/normal,
-  `E` edit `projects.json` in `$VISUAL`/`$EDITOR`, `q`/Esc close.
-- Mouse: click selects, double click opens, wheel scrolls.
+No network besides git. Files: the catalog and settings below, and its cache in Herdr's data
+folder, all on this computer. A project with a `"machine"` field (a herdr-core machine name,
+`hc machine ls`) has git, perl, sh and find run on that machine; its paths compare exactly
+(case-sensitive), while this computer's compare the macOS way.
 
 ## Files
 
-- `$HERDR_PLUGIN_CONFIG_DIR/projects.json` — the catalog, same shape as Project Tiles
-  (unknown fields are kept). Written atomically, reloaded when it changes on disk; a broken
-  file is left alone (edits are refused until it parses) and the current state kept. Several
-  writers share it: the binary saves under a lock (`.projects.json.lock`) and merges what others
-  wrote since its last read (by project/collection id, field by field; on a clash its own edit
-  wins); the Herdr.app mod writes only if the file is unchanged since it read it.
-- `$HERDR_PLUGIN_CONFIG_DIR/settings.json` — `columns, tile_size, show_path, show_description,
+- `~/.config/herdr/plugins/config/vndv.project-tiles/projects.json` — the catalog, same shape
+  as Project Tiles for VS Code (unknown fields are kept). Reloaded when it changes on disk; a
+  broken file is left alone (edits are refused until it parses). Edits are written only if the
+  file is unchanged since the mod read it.
+- `settings.json` next to it — `columns, tile_size, show_path, show_description,
   show_languages, show_git, fetch_remote, metadata_cache_minutes, language_cache_hours,
   max_files_scanned, open_mode (workspace|tab), language_ignore_dirs`.
-- `$HERDR_PLUGIN_STATE_DIR/metadata-cache.json` — git/language cache (format v2).
-
-`herdr plugin config-dir vndv.project-tiles` prints the config directory.
-
-## Sidebar tokens
-
-Source `plugin:vndv.project-tiles`, per workspace matched to a project by its panes' cwd
-(or by the `pt_id` token): `$pt_id`, `$pt_project` (logo + name), `$pt_git` (`↑N ↓N ●N` or `✓`),
-`$pt_langs` (top language). Sent by the startup hook (tokens do not survive a server restart),
-on `workspace.created`, when opening from the panel and while the panel is open. Example:
-
-    [ui.sidebar.spaces]
-    rows = [["state_icon", "workspace"], ["branch", "$pt_git"]]
-
-Toasts need `[ui.toast] delivery = "herdr"` (the default is `off`).
-
-## git
-
-git runs as a subprocess in the project directory, so per-folder `includeIf` identities and
-`core.sshCommand` apply; `GIT_SSH_COMMAND` is never set. Calls run in their own process group
-with stdin closed and `GIT_TERMINAL_PROMPT=0`, so ssh cannot ask for a password and hang.
-Read-only calls add `--no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null`.
+- `~/.config/herdr-app/data/project-tiles/metadata-cache.json` — git and language cache. On
+  first start it is seeded from the cache of the former Rust backend
+  (`~/.local/state/herdr/plugins/vndv.project-tiles/metadata-cache.json`) when that exists.
 
 ## Development
 
-    cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-    UPDATE_SNAPSHOTS=1 cargo test   # accept new render snapshots (snapshots/*.txt)
-    node herdr-app/test.mjs          # the mod's pure logic
-    cargo install --locked --path .  # the binary the Herdr.app mod uses
+    node herdr-app/test.mjs                    # model.js: pure logic, plus git against temp repos
+    herdr-app check herdr-app/mods/project-tiles
 
-Tests never touch the network: render snapshots use `TestBackend`, the herdr side is a fake
-NDJSON socket server.
+`model.js` has no Herdr imports: everything that runs a program takes a `run(argv, {cwd,
+timeout})` function, which `main.js` maps to Herdr's `exec` and the tests to `child_process`.
+Tests never touch the network and ignore your own git config (`GIT_CONFIG_GLOBAL=/dev/null`,
+only `file://` remotes).
+
+Earlier versions shipped a Rust binary that also served the herdr TUI as a plugin; it is in the
+git history (last at `2bdad21`).
 
 ## License
 

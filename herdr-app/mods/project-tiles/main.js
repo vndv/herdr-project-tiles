@@ -3,17 +3,18 @@
 // (mod.open:project-tiles), or embedded in a layout block (props {embedded: true}), e.g. the
 // command-center layout's center stack next to Terminals and Board.
 //
-// Runs programs: the project-tiles binary (found on PATH or in ~/.cargo/bin, ~/.local/bin,
-// Homebrew), which runs git in project folders, and `open` for links and Finder. Reads and
-// writes files outside its folder: the catalog, settings and cache below.
+// Runs programs (through /usr/bin/env): git in project folders (read-only and without hooks for
+// the status; fetch, pull, push when asked, plus a background fetch for repos with an upstream),
+// perl as a timeout guard for those network calls, sh/find/wc for folder checks and the language
+// scan of folders without git, and `open` for links and Finder. A project with a `machine`
+// (a herdr-core machine name) runs all of that there (exec's `on`).
 //
-// Live from Herdr (no polling): which spaces show a project (◆ 1,3), where you are (● here),
-// and the agents working / blocked / done in it. Git and languages come from the
-// project-tiles binary (`project-tiles app meta`), which runs git in the project folder
-// without a terminal (so ssh never prompts) and caches results.
+// Live from Herdr (no polling): which spaces show a project, where you are, and the agents
+// working / blocked / done in it.
 //
-// Catalog: ~/.config/herdr/plugins/config/vndv.project-tiles/projects.json (Project Tiles format),
-// shared with the herdr TUI plugin. Edits are written with writeTextFile's stale check.
+// Files outside its folder: the catalog ~/.config/herdr/plugins/config/vndv.project-tiles/
+// projects.json (Project Tiles format) and settings.json next to it, written with
+// writeTextFile's stale check. The git/language cache lives in its data folder.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
@@ -23,17 +24,8 @@ import {
 } from "herdr";
 import * as M from "./model.js";
 
-// The backend binary (github.com/vndv/herdr-project-tiles). Install it with
-//   cargo install --locked --git https://github.com/vndv/herdr-project-tiles
-// A layout block can point at another build with props {bin: "/path/to/project-tiles"}.
-const REPO = "https://github.com/vndv/herdr-project-tiles";
-const BIN_CANDIDATES = (h) => [
-  "project-tiles", // on PATH (exec uses the user's real environment)
-  `${h}/.cargo/bin/project-tiles`,
-  `${h}/.local/bin/project-tiles`,
-  "/opt/homebrew/bin/project-tiles",
-  "/usr/local/bin/project-tiles",
-];
+/** Concurrent per-project refreshes (git + languages). */
+const WORKERS = 6;
 
 const HELP = [
   ["←↑↓→ hjkl", "move (mouse: click selects, double-click opens)"],
@@ -63,8 +55,17 @@ export default class ProjectTiles extends View {
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
     this.home = home();
-    this.bin = null;
-    this.paths = null;
+    const config = `${this.home}/.config/herdr/plugins/config/vndv.project-tiles`;
+    this.paths = {
+      config,
+      catalog: `${config}/projects.json`,
+      settings: `${config}/settings.json`,
+      cache: `${appHome()}/data/project-tiles/metadata-cache.json`,
+      // The cache of the former Rust backend: read once when there is no cache of our own.
+      legacyCache: `${this.home}/.local/state/herdr/plugins/vndv.project-tiles/metadata-cache.json`,
+    };
+    this.pool = M.makePool(WORKERS);
+    this.machines = {};
     this.cat = M.emptyCatalog();
     this.catText = null;
     this.catError = null;
@@ -72,6 +73,9 @@ export default class ProjectTiles extends View {
     this.settingsText = null;
     this.meta = {};
     this.busy = new Set();
+    // Asked for while busy (e.g. its path changed mid-refresh): refreshed again when it is free.
+    this.pending = new Set();
+    this.closed = false;
     this.loading = 0;
     this.at = null;
     this.query = "";
@@ -89,7 +93,12 @@ export default class ProjectTiles extends View {
     }
     if (checking()) return;
     cx.spawn(async (cx) => {
-      await this.boot(cx);
+      try {
+        await this.boot(cx);
+      } catch (e) {
+        this.say(`could not load: ${e.message}`, true);
+        cx.notify();
+      }
     });
     // "focus": sent by pane.go (focusable) or by the tab bar when it shows this tab.
     cx.spawn(async (cx) => {
@@ -101,18 +110,24 @@ export default class ProjectTiles extends View {
     });
     // The catalog can change on disk (hand edit, the TUI plugin, `E`).
     cx.timer.every(2000, (cx) => cx.spawn(async (cx) => {
-      const fetch = this.settings.fetch_remote ? ["--fetch"] : [];
-      if (await this.reloadCatalog()) {
-        // New projects, or a path changed elsewhere (TUI, editor): the old folder's metadata
-        // (branch, links, availability) does not apply any more.
-        const stale = this.cat.projects.filter((p) => !M.metaFits(this.meta[p.id], p)).map((p) => p.id);
-        stale.forEach((id) => delete this.meta[id]);
-        cx.notify();
-        if (stale.length) await this.loadMeta(cx, fetch, stale);
-      } else if (!this.loading && this.metaAt && Date.now() - this.metaAt > this.settings.metadata_cache_minutes * 60000) {
-        // The dashboard stays open: refresh what went past its TTL (the backend decides what).
-        await this.loadMeta(cx, fetch);
+      if (!this.booted || this.closed) return;
+      try {
+        const fetch = this.settings.fetch_remote;
+        if (await this.reloadCatalog()) {
+          // New projects, or a path / machine changed elsewhere (editor, another copy): the old
+          // folder's metadata (branch, links, availability) does not apply any more.
+          const stale = this.cat.projects.filter((p) => !M.metaFits(this.meta[p.id], p)).map((p) => p.id);
+          stale.forEach((id) => delete this.meta[id]);
+          cx.notify();
+          if (stale.length) await this.refresh(cx, stale, { fetch });
+        } else if (!this.loading && this.metaAt && Date.now() - this.metaAt > this.settings.metadata_cache_minutes * 60000) {
+          // The dashboard stays open: refresh what went past its TTL (`due` decides what).
+          await this.refresh(cx, null, { fetch });
+        }
+      } catch (e) {
+        this.say(`refresh: ${e.message}`, true);
       }
+      cx.notify();
     }));
   }
 
@@ -124,81 +139,153 @@ export default class ProjectTiles extends View {
 
   // ------------------------------------------------------------ data
 
-  async backend(args, timeout = 60000) {
-    const r = await exec(this.bin, ["app", ...args], { timeout });
-    let out = null;
-    try {
-      out = JSON.parse(r.stdout.trim().split("\n").pop() || "null");
-    } catch {}
-    if (r.code !== 0 || !out || out.error) {
-      throw new Error(out?.error || r.stderr.trim() || `project-tiles: exit ${r.code}`);
-    }
-    return out;
+  /** exec for a project's machine, as model.js expects it: /usr/bin/env argv, never throws. */
+  runner(p) {
+    const on = M.machineOf(p);
+    return (argv, { cwd, timeout = M.QUICK } = {}) =>
+      exec("/usr/bin/env", argv, { cwd, on, timeout }).catch((e) => ({
+        code: /longer than|timed? ?out/i.test(e.message) ? 124 : 127,
+        stdout: "",
+        stderr: e.message,
+      }));
   }
 
-  /** The first candidate that answers `app paths`; sets this.bin. */
-  async findBackend() {
-    const custom = props()?.bin;
-    for (const bin of [...(custom ? [custom] : []), ...BIN_CANDIDATES(this.home)]) {
-      this.bin = bin;
-      try {
-        return await this.backend(["paths"], 10000);
-      } catch {}
-    }
-    this.bin = null;
-    return null;
+  /** Per-machine git flags (a machine without perl). */
+  gitState(p) {
+    return (this.machines[M.machineOf(p) ?? ""] ??= {});
   }
 
   async boot(cx) {
     // gitview (github.com/ChmaraX/herdr-gitview) is optional: its button shows when it is installed.
     this.hasGitview = (await readTextFile(`${appHome()}/mods/gitview-tab/mod.json`).catch(() => null)) !== null;
-    this.paths = await this.findBackend();
-    if (!this.paths) {
-      this.say(`project-tiles backend not found — install it: cargo install --locked --git ${REPO}`, true);
-      cx.notify();
-      return;
-    }
     await this.reloadSettings();
     await this.reloadCatalog();
+    await this.loadCache();
     this.startAt();
+    this.booted = true;
     cx.notify();
-    await this.loadMeta(cx, ["--cached"]);
-    await this.loadMeta(cx, []);
+    // Local state first so every tile fills quickly, then the fetches.
+    await this.refresh(cx, null, {});
     if (this.settings.fetch_remote) {
-      await this.loadMeta(cx, ["--fetch"]);
-      // Counts not yet checked against the remote ("no fetch"), even if the local cache is fresh.
+      const tried = await this.refresh(cx, null, { fetch: true });
+      // Counts not yet checked against the remote ("no fetch"), even if the fetch TTL is fresh.
       const unfetched = this.cat.projects
-        .filter((p) => this.meta[p.id]?.git?.upstream && !this.meta[p.id].git.fetched)
+        .filter((p) => this.metaOf(p)?.git?.upstream && !this.metaOf(p).git.fetched && !tried.includes(p.id))
         .map((p) => p.id);
-      if (unfetched.length) await this.loadMeta(cx, ["--force", "--fetch"], unfetched);
+      if (unfetched.length) await this.refresh(cx, unfetched, { force: true, fetch: true });
     }
   }
 
-  async loadMeta(cx, args, ids = null) {
-    const idArgs = (ids ?? []).flatMap((id) => ["--id", id]);
-    const marks = ids ?? (args.includes("--cached") ? [] : this.cat.projects.map((p) => p.id));
-    marks.forEach((id) => this.busy.add(id));
+  /**
+   * Refreshes what is past its TTL (everything with `force`), at most WORKERS projects at once;
+   * each tile updates as its phases finish. Returns the ids that were fetched.
+   */
+  async refresh(cx, ids = null, { force = false, fetch = false } = {}) {
+    const now = M.nowSecs();
+    const list = ids ? ids.map((id) => this.project(id)).filter(Boolean) : [...this.cat.projects];
+    const jobs = [];
+    for (const p of list) {
+      if (this.closed) break;
+      if (this.busy.has(p.id)) {
+        if (ids) this.pending.add(p.id);
+        continue;
+      }
+      const d = M.due(this.meta[p.id], p, this.settings, now, { force, fetch: fetch && this.settings.fetch_remote });
+      if (!d.git && !d.lang) continue;
+      this.busy.add(p.id);
+      jobs.push(this.pool(async () => {
+        if (this.closed) {
+          this.busy.delete(p.id);
+          return null;
+        }
+        // A late answer for a project whose path or machine changed meanwhile is dropped.
+        const publish = (m) => {
+          const q = this.project(p.id);
+          if (!this.closed && q && M.metaFits(m, q)) this.meta[p.id] = m;
+          cx.notify();
+        };
+        try {
+          await M.refreshProject(this.runner(p), p, this.meta[p.id], this.settings, d, publish, this.gitState(p));
+        } catch (e) {
+          this.say(`git/languages — ${p.name}: ${e.message}`, true);
+        }
+        this.busy.delete(p.id);
+        cx.notify();
+        return d.remote ? p.id : null;
+      }));
+    }
+    if (!ids) this.metaAt = Date.now();
+    if (!jobs.length) return [];
     this.loading++;
     cx.notify();
-    try {
-      const r = await this.backend(["meta", ...args, ...idArgs], 300000);
-      // A late answer for a project whose path changed meanwhile is dropped.
-      for (const [id, m] of Object.entries(r.projects ?? {})) {
-        const p = this.project(id);
-        if (p && M.metaFits(m, p)) this.meta[id] = m;
-      }
-      if (!ids && !args.includes("--cached")) this.metaAt = Date.now();
-    } catch (e) {
-      this.say(`git/languages: ${e.message}`, true);
-    }
-    marks.forEach((id) => this.busy.delete(id));
+    const done = await Promise.all(jobs);
     this.loading--;
+    await this.saveCache();
     cx.notify();
+    this.runPending(cx);
+    return done.filter(Boolean);
+  }
+
+  /** Projects asked for while they were busy: refreshed now (their metadata was dropped if it no
+   *  longer fits, so `due` rescans them). */
+  runPending(cx) {
+    const ids = [...this.pending].filter((id) => !this.busy.has(id) && this.project(id));
+    ids.forEach((id) => this.pending.delete(id));
+    if (ids.length && !this.closed) cx.spawn(async (cx) => this.refresh(cx, ids, { fetch: this.settings.fetch_remote }));
+  }
+
+  /** The project's metadata, when it still belongs to its folder and machine. */
+  metaOf(p) {
+    const m = p ? this.meta[p.id] : null;
+    return M.metaFits(m, p) ? m : null;
+  }
+
+  /** The cache, or (only when there is none yet) the old Rust backend's, which then seeds ours.
+   *  A cache that cannot be read is left alone: everything is scanned again. */
+  async loadCache() {
+    let text;
+    try {
+      text = await readTextFile(this.paths.cache);
+    } catch (e) {
+      this.say(`metadata cache not readable, rescanning: ${e.message}`, true);
+      return;
+    }
+    const legacy = text === null;
+    if (legacy) text = await readTextFile(this.paths.legacyCache).catch(() => null);
+    Object.assign(this.meta, M.fittingMeta(this.cat, M.parseCache(text)));
+    if (legacy && Object.keys(this.meta).length) await this.saveCache();
+  }
+
+  /** Writes the cache, merged per phase with what another copy wrote meanwhile. The write only
+   *  lands if the file is still what was read (else read, merge and try again). */
+  async saveCache() {
+    if (checking() || this.closed) return;
+    let error = null;
+    for (let i = 0; i < 3; i++) {
+      let text;
+      try {
+        text = await readTextFile(this.paths.cache);
+      } catch (e) {
+        // Not "absent": writing with expected = null would be refused anyway; don't guess.
+        error = e;
+        break;
+      }
+      const merged = M.mergeCache(M.parseCache(text), this.meta, this.cat);
+      for (const [id, m] of Object.entries(merged)) if (m !== this.meta[id] && !this.busy.has(id)) this.meta[id] = m;
+      try {
+        await writeTextFile(this.paths.cache, M.cacheText(merged), text);
+        if (this.cacheError) this.cacheError = null;
+        return;
+      } catch (e) {
+        error = e;
+      }
+    }
+    if (this.cacheError !== error.message) this.say(`metadata cache not saved: ${error.message}`, true);
+    this.cacheError = error.message;
   }
 
   async reloadSettings() {
-    if (!this.paths) return;
-    const text = await readTextFile(this.paths.settings);
+    const text = await readTextFile(this.paths.settings).catch(() => null);
     this.settingsText = text;
     try {
       this.settings = { ...M.DEFAULT_SETTINGS, ...(text ? JSON.parse(text) : {}) };
@@ -216,6 +303,7 @@ export default class ProjectTiles extends View {
     cur[key] = value;
     const text = JSON.stringify(cur, null, 2) + "\n";
     try {
+      if (this.settingsText === null) await this.ensureConfigDir();
       await writeTextFile(this.paths.settings, text, this.settingsText);
       this.settingsText = text;
     } catch {
@@ -225,8 +313,15 @@ export default class ProjectTiles extends View {
 
   /** True when the catalog changed. A file that doesn't parse keeps the current state. */
   async reloadCatalog() {
-    if (!this.paths) return false;
-    const text = await readTextFile(this.paths.catalog);
+    let text;
+    try {
+      text = await readTextFile(this.paths.catalog);
+    } catch (e) {
+      // Not readable (too big, permissions): keep the list, don't treat it as deleted.
+      if (this.catError !== e.message) this.say(`projects.json not readable, keeping the previous state: ${e.message}`, true);
+      this.catError = e.message;
+      return false;
+    }
     if (text === this.catText) return false;
     if (text === null) {
       this.catText = null;
@@ -249,6 +344,7 @@ export default class ProjectTiles extends View {
   async save(cx) {
     const text = M.catalogText(this.cat);
     try {
+      if (this.catText === null) await this.ensureConfigDir();
       await writeTextFile(this.paths.catalog, text, this.catText);
       this.catText = text;
       return true;
@@ -260,6 +356,11 @@ export default class ProjectTiles extends View {
     }
   }
 
+  /** The catalog folder, for a first save on a fresh machine. */
+  async ensureConfigDir() {
+    await exec("mkdir", ["-p", this.paths.config]).catch(() => null);
+  }
+
   say(text, err = false) {
     this.status = { text, err };
   }
@@ -268,13 +369,14 @@ export default class ProjectTiles extends View {
 
   derived() {
     const cols = M.columnsFor(Math.max(200, this.width - 32), this.settings);
-    const { rows, items } = M.buildRows(this.cat, this.meta, this.query, cols);
-    const local = spaces().filter((s) => !s.machine);
+    const meta = M.fittingMeta(this.cat, this.meta);
+    const { rows, items } = M.buildRows(this.cat, meta, this.query, cols);
+    const all = spaces();
     // Linked worktrees (~/.herdr/worktrees/...) count for their project.
-    const extra = M.worktreeRoots(this.meta);
-    const pres = M.presence(this.cat, local, panes(), extra);
+    const extra = M.worktreeRoots(meta);
+    const pres = M.presence(this.cat, all, panes(), extra);
     const f = focused();
-    const here = f?.cwd ? M.projectForCwd(this.cat, f.cwd, extra)?.id ?? null : null;
+    const here = f?.cwd ? M.projectForCwd(this.cat, f.cwd, extra, M.machineOfTab(all, f.tab))?.id ?? null : null;
     return { cols, rows, items, pres, here };
   }
 
@@ -316,20 +418,25 @@ export default class ProjectTiles extends View {
     return { stack: f.stack.id, child: f.child.id, back: first?.id ?? null, shown: f.stack.active === f.child.id };
   }
 
+  /** Herdr's cleanup hook (pane, tab, overlay gone, or app quit): stop starting work and stop
+   *  publishing. git calls already running finish on their own deadlines. */
+  async close() {
+    this.closed = true;
+  }
+
   /** The dialog closes; the embedded tab goes back to the stack's other child (Terminals). */
-  close() {
+  dismiss() {
     if (!this.embedded) return closeOverlay(props()?.overlay);
     const s = this.stackInfo();
     if (s?.back) run("layout.select", { stack: s.stack, child: s.back });
   }
 
   open(p, mode, pres) {
-    const ok = (() => {
-      const m = this.meta[p.id];
-      return !m?.availability;
-    })();
-    if (!ok) return this.say(`folder unavailable: ${p.path}`, true);
-    this.close();
+    if (this.metaOf(p)?.availability) return this.say(`folder unavailable: ${p.path}`, true);
+    const machine = M.machineOf(p);
+    // A tab opens in the current space, so only on that space's machine.
+    if (mode === "tab" && M.machineOfTab(spaces(), focused()?.tab) !== machine) mode = "space";
+    this.dismiss();
     if (mode === "tab") {
       run("tab.new", { folder: p.path, name: p.name });
       return;
@@ -341,35 +448,41 @@ export default class ProjectTiles extends View {
       run("space.select", { id: s.id });
       return;
     }
-    run("space.new", { folder: p.path, name: p.name });
+    run("space.new", { folder: p.path, name: p.name, ...(machine ? { machine } : {}) });
   }
 
-  openUrl(url) {
+  openUrl(cx, url) {
     if (!url) return;
-    exec("open", [url]).catch((e) => this.say(`could not open ${url}: ${e.message}`, true));
+    cx.spawn(async (cx) => {
+      const r = await exec("open", [url]).catch((e) => ({ code: 1, stderr: e.message }));
+      if (r.code !== 0) {
+        this.say(`could not open ${url}: ${(r.stderr ?? "").trim() || `exit ${r.code}`}`, true);
+        cx.notify();
+      }
+    });
   }
 
   /** gitview for this project: show its space (the open one, else a new one), then gitview's own
    *  launcher (cmd-g), which opens the gitview tab for the shown space's repo. */
   gitview(p, pres) {
     if (!this.hasGitview) return this.say("gitview is not installed (github.com/ChmaraX/herdr-gitview)", true);
-    if (!this.meta[p.id]?.git) return this.say("not a git repository", true);
-    if (this.meta[p.id]?.availability) return this.say(`folder unavailable: ${p.path}`, true);
-    this.close();
+    if (!this.metaOf(p)?.git) return this.say("not a git repository", true);
+    if (this.metaOf(p)?.availability) return this.say(`folder unavailable: ${p.path}`, true);
+    this.dismiss();
     const open = pres[p.id]?.spaces ?? [];
     const s = open.find((x) => x.active) ?? open[0];
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: p.path, name: p.name });
+    else run("space.new", { folder: p.path, name: p.name, ...(M.machineOf(p) ? { machine: M.machineOf(p) } : {}) });
     run("mod.open", { name: "gitview-tab" });
   }
 
   /** Herdr's worktree dialog for this repository: "new" makes a checkout and opens it as a space
    *  nested under the repo; "open" lists the existing checkouts. */
   worktree(p, action = "new") {
-    if (!this.meta[p.id]?.git) return this.say("not a git repository", true);
-    this.close();
+    if (!this.metaOf(p)?.git) return this.say("not a git repository", true);
+    this.dismiss();
     const size = action === "open" ? { width: 560, height: 480 } : { width: 460, height: 280 };
-    openOverlay({ mod: "worktree", kind: "dialog", ...size, props: { folder: p.path, machine: null, action } });
+    openOverlay({ mod: "worktree", kind: "dialog", ...size, props: { folder: p.path, machine: M.machineOf(p), action } });
   }
 
   gitOp(cx, p, op) {
@@ -378,12 +491,21 @@ export default class ProjectTiles extends View {
     this.say(`git ${op}: ${p.name}…`);
     cx.spawn(async (cx) => {
       try {
-        const r = await this.backend(["git", op, p.id], 150000);
-        if (r.meta) this.meta[p.id] = r.meta;
-        if (r.ok) this.say(`git ${op}: done — ${p.name}`);
+        const runp = this.runner(p);
+        const state = this.gitState(p);
+        const avail = await M.availability(runp, p.path);
+        if (avail) throw new Error(`folder ${avail}: ${p.path}`);
+        if (!(await M.isRepo(runp, p.path))) throw new Error("not a git repository");
+        const o = await M.remoteOp(runp, p.path, op, state);
+        const m = await M.afterRemoteOp(runp, p, this.meta[p.id], o.code === 0, state);
+        const q = this.project(p.id);
+        if (!this.closed && q && M.metaFits(m, q)) this.meta[p.id] = m;
+        await this.saveCache();
+        if (o.code === 0) this.say(`git ${op}: done — ${p.name}`);
         else {
-          this.say(`git ${op} failed — ${p.name}: ${r.message}`, true);
-          notify({ title: `git ${op} failed — ${p.name}`, body: r.message, level: "error" });
+          const msg = M.gitMessage(o);
+          this.say(`git ${op} failed — ${p.name}: ${msg}`, true);
+          notify({ title: `git ${op} failed — ${p.name}`, body: msg, level: "error" });
         }
       } catch (e) {
         this.say(`git ${op}: ${e.message}`, true);
@@ -391,6 +513,7 @@ export default class ProjectTiles extends View {
       }
       this.busy.delete(p.id);
       cx.notify();
+      this.runPending(cx);
     });
   }
 
@@ -437,21 +560,26 @@ export default class ProjectTiles extends View {
     });
   }
 
-  addPath(cx, raw, collection) {
+  /** `machine`: the folder is on that machine (the focused terminal's), null for this one. */
+  addPath(cx, raw, collection, machine = null) {
     cx.spawn(async (cx) => {
       try {
-        const base = focused()?.cwd || this.home;
-        const r = await this.backend(["resolve", M.expandPath(raw, this.home), "--base", base]);
+        const runm = this.runner({ machine });
+        const home = await this.homeOn(runm, machine);
+        if (!home) throw new Error(`cannot reach ${machine}`);
+        const base = (machine === this.focusedMachine() && focused()?.cwd) || home;
+        const r = await M.resolveFolder(runm, raw, base, home);
         if (!r.ok) {
           this.say(r.error, true);
           return cx.notify();
         }
-        const existing = M.findPath(this.cat, r.path);
+        const existing = M.findPath(this.cat, r.path, machine);
         if (existing) {
           this.say(`already listed: ${existing.name} — editing`);
           this.projectForm(existing, false);
         } else {
           const p = { id: M.newId(), name: r.name, path: r.path, logo: { kind: "auto" } };
+          if (machine) p.machine = machine;
           if (collection) p.collectionId = collection;
           this.projectForm(p, true);
         }
@@ -467,11 +595,32 @@ export default class ProjectTiles extends View {
     this.say("importing…");
     cx.spawn(async (cx) => {
       try {
-        const r = await this.backend(["import", ...folders.flatMap((f) => ["--cwd", f])], 120000);
+        // Open folders, each normalized to its git top level on its own machine.
+        const roots = [];
+        for (const f of folders) {
+          const r = await M.resolveFolder(this.runner(f), f.path, f.path, this.home);
+          if (r.ok) roots.push({ path: r.path, machine: f.machine });
+        }
+        let vscode = null;
+        for (const path of M.vscodeCatalogPaths(this.home)) {
+          const text = await readTextFile(path).catch(() => null);
+          if (text === null) continue;
+          try {
+            vscode = M.parseCatalog(text);
+            break;
+          } catch {}
+        }
         await this.reloadCatalog();
-        this.say(`imported or updated: ${r.added}${r.vscode ? "" : " (VS Code Project Tiles catalog not found)"}`);
+        if (this.catError) throw new Error("projects.json does not parse, not touching it");
+        const before = new Set(this.cat.projects.map((p) => p.id));
+        const was = M.catalogText(this.cat);
+        const added = M.importInto(this.cat, vscode, roots, this.home);
+        // Collections alone (a new one, a description, a colour) are a change too.
+        if (M.catalogText(this.cat) !== was && !(await this.save(cx))) return cx.notify();
+        this.say(`imported or updated: ${added}${vscode ? "" : " (VS Code Project Tiles catalog not found)"}`);
         cx.notify();
-        if (r.added) await this.loadMeta(cx, []);
+        const fresh = this.cat.projects.filter((p) => !before.has(p.id)).map((p) => p.id);
+        if (fresh.length) await this.refresh(cx, fresh, { fetch: this.settings.fetch_remote });
       } catch (e) {
         this.say(`import: ${e.message}`, true);
       }
@@ -480,8 +629,7 @@ export default class ProjectTiles extends View {
   }
 
   editFile() {
-    if (!this.paths) return;
-    this.close();
+    this.dismiss();
     run("tab.new", {
       name: "projects.json",
       argv: ["sh", "-c", 'exec ${VISUAL:-${EDITOR:-vi}} "$1"', "sh", this.paths.catalog],
@@ -530,7 +678,7 @@ export default class ProjectTiles extends View {
     const cur = Math.max(0, opts.findIndex((o) => o.value && o.value === p.collectionId));
     this.makeForm(isNew ? "New project" : `Project: ${p.name}`, [
       { label: "Name", value: p.name },
-      { label: "Path", value: M.shortPath(p.path, this.home), hint: "project folder; ~ is expanded" },
+      { label: "Path", value: M.machineOf(p) ? p.path : M.shortPath(p.path, this.home), hint: M.machineOf(p) ? `folder on ${M.machineOf(p)}; ~ is that machine's home` : "project folder; ~ is expanded" },
       { label: "Description", value: p.description ?? "" },
       { label: "Colour", value: p.color ?? "", hint: "#hex or red orange yellow green teal blue purple gray; empty: the collection's colour" },
       { label: "Logo", value: M.emojiOf(p) ?? "", hint: "up to 3 emoji; empty: initials" },
@@ -538,13 +686,19 @@ export default class ProjectTiles extends View {
       { label: "Collection", options: opts, choice: cur, hint: "←→ to choose; n creates a new collection" },
     ], async (cx) => {
       const raw = this.formValue(1).trim();
+      const machine = M.machineOf(p);
+      const runm = this.runner(p);
       let path = p.path;
-      if (raw && M.norm(M.expandPath(raw, this.home)) !== M.norm(p.path)) {
-        const r = await this.backend(["resolve", M.expandPath(raw, this.home), "--base", this.home]);
-        if (!r.ok) return r.error;
-        path = r.path;
+      if (raw && raw !== M.shortPath(p.path, this.home)) {
+        const home = await this.homeOn(runm, machine);
+        if (!home) return `cannot reach ${machine}`;
+        if (M.norm(M.resolvePath(raw, home, home), machine) !== M.norm(p.path, machine)) {
+          const r = await M.resolveFolder(runm, raw, home, home);
+          if (!r.ok) return r.error;
+          path = r.path;
+        }
       }
-      const other = M.findPath(this.cat, path);
+      const other = M.findPath(this.cat, path, M.machineOf(p));
       if (other && other.id !== p.id) return `this path is already the project "${other.name}"`;
       const colorRaw = this.formValue(3).trim();
       const color = colorRaw ? M.parseColor(colorRaw, theme()) : null;
@@ -552,6 +706,8 @@ export default class ProjectTiles extends View {
       const q = isNew ? { ...p } : this.project(p.id);
       if (!q) return "the project is no longer in the catalog";
       q.name = this.formValue(0).trim() || M.baseName(path);
+      // Another folder: the old one's branch, links and languages no longer apply.
+      if (q.path !== path) delete this.meta[q.id];
       q.path = path;
       const desc = this.formValue(2).trim();
       if (desc) q.description = desc;
@@ -571,7 +727,7 @@ export default class ProjectTiles extends View {
       const { items } = this.derived();
       this.selectId(items, "tile", q.id);
       this.say(`saved: ${q.name}`);
-      cx.spawn(async (cx) => this.loadMeta(cx, ["--force"], [q.id]));
+      cx.spawn(async (cx) => this.refresh(cx, [q.id], { force: true }));
       return null;
     });
   }
@@ -693,7 +849,7 @@ export default class ProjectTiles extends View {
     if (navs[key]) this.at = M.nav(d.items, this.at ?? 0, ...navs[key]);
     else if (k === "escape" || key === "q") {
       if (this.query) this.query = "";
-      else return this.close();
+      else return this.dismiss();
     } else if (k === "enter") {
       if (p) this.open(p, this.settings.open_mode === "tab" ? "tab" : "space", d.pres);
       else if (head) this.toggleCollapse(cx, head);
@@ -709,16 +865,19 @@ export default class ProjectTiles extends View {
     else if (key === "g" && p) this.gitview(p, d.pres);
     else if (key === "a") {
       const cwd = focused()?.cwd;
-      if (cwd) this.addPath(cx, cwd, this.collectionOf(cur));
+      if (cwd) this.addPath(cx, cwd, this.collectionOf(cur), this.focusedMachine());
       else this.say("no current folder — use A", true);
     } else if (key === "A") {
-      const start = M.shortPath(focused()?.cwd ?? "", this.home) || "~/";
+      // On the focused terminal's machine, starting from its folder.
+      const machine = this.focusedMachine();
+      const cwd = focused()?.cwd ?? "";
+      const start = (machine ? cwd : M.shortPath(cwd, this.home)) || "~/";
       const coll = this.collectionOf(cur);
       this.makeForm("Add folder", [{ label: "Folder path", value: start, hint: "~ is expanded; the path is normalized to the git root" }], async (cx) => {
         const v = this.formValue(0).trim();
         if (!v) return "enter a path";
         this.modal = null;
-        this.addPath(cx, v, coll);
+        this.addPath(cx, v, coll, machine);
         return null;
       });
     } else if (key === "I") this.importAll(cx);
@@ -755,9 +914,20 @@ export default class ProjectTiles extends View {
     else if (key === "P" && p) this.gitOp(cx, p, "push");
     else if (key === "r" && p) {
       this.say(`refreshing ${p.name}…`);
-      cx.spawn(async (cx) => this.loadMeta(cx, ["--force"], [p.id]));
+      cx.spawn(async (cx) => this.refresh(cx, [p.id], { force: true }));
     } else if (key === "R") this.refreshAll(cx);
-    else if (key === "O" && p) exec("open", [p.path]).catch(() => {});
+    else if (key === "O" && p) {
+      if (M.machineOf(p)) this.say(`on ${M.machineOf(p)}: Finder shows this computer only`, true);
+      else {
+        cx.spawn(async (cx) => {
+          const r = await exec("open", ["--", p.path]).catch((e) => ({ code: 1, stderr: e.message }));
+          if (r.code !== 0) {
+            this.say(`Finder: ${(r.stderr ?? "").trim() || `exit ${r.code}`}`, true);
+            cx.notify();
+          }
+        });
+      }
+    }
     else if (key === "c") {
       cx.spawn(async (cx) => {
         await this.saveSetting("tile_size", this.settings.tile_size === "compact" ? "normal" : "compact");
@@ -768,6 +938,19 @@ export default class ProjectTiles extends View {
     this.focusSelf();
     cx.stop_propagation();
     cx.notify();
+  }
+
+  /** $HOME on `machine` (this computer's for null), asked once per machine. */
+  async homeOn(run, machine) {
+    if (!machine) return this.home;
+    const st = (this.machines[machine] ??= {});
+    st.home ??= await M.machineHome(run);
+    return st.home;
+  }
+
+  /** The machine of the focused terminal's space (null: this computer). */
+  focusedMachine() {
+    return M.machineOfTab(spaces(), focused()?.tab);
   }
 
   collectionOf(it) {
@@ -841,7 +1024,7 @@ export default class ProjectTiles extends View {
       .child(div().flex_1())
       .child(this.button(t, "pt-add", "plus", "Add current folder", true, (cx) => {
         const cwd = focused()?.cwd;
-        if (cwd) this.addPath(cx, cwd, null);
+        if (cwd) this.addPath(cx, cwd, null, this.focusedMachine());
         else this.say("no current folder — use Add folder…", true);
         cx.notify();
       }))
@@ -856,7 +1039,7 @@ export default class ProjectTiles extends View {
           : this.icon("refresh", 14, t.muted)))
       .when(!this.embedded, (el) => el.child(div().id("pt-esc").flex_none().px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click(() => this.close()).child("Esc")));
+        .on_click(() => this.dismiss()).child("Esc")));
 
     const body = this.cat.projects.length ? this.renderRows(t, d, cur) : this.renderEmpty(t);
 
@@ -912,8 +1095,9 @@ export default class ProjectTiles extends View {
     this.say("refreshing all projects…");
     cx.spawn(async (cx) => {
       await this.reloadCatalog();
-      await this.loadMeta(cx, ["--force", ...(this.settings.fetch_remote ? ["--fetch"] : [])]);
-      this.say("refreshed");
+      await this.refresh(cx, null, { force: true, fetch: this.settings.fetch_remote });
+      // An error said meanwhile (a failed write, an unreadable file) stays.
+      if (!this.status?.err) this.say("refreshed");
       cx.notify();
     });
   }
@@ -960,7 +1144,7 @@ export default class ProjectTiles extends View {
   }
 
   renderTile(t, p, w, sel, d) {
-    const m = this.meta[p.id] ?? {};
+    const m = this.metaOf(p) ?? {};
     const pres = d.pres[p.id] ?? { spaces: [], working: 0, blocked: 0, done: 0 };
     const compact = this.settings.tile_size === "compact";
     const s = this.settings;
@@ -1000,7 +1184,7 @@ export default class ProjectTiles extends View {
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(p.name))
         .when((compact || s.show_path) && M.shown(p, "path", s), (el) => el.child(
-          div().truncate().text_ellipsis_start().text_size(11).text_color(t.dim).child(p.path))));
+          div().truncate().text_ellipsis_start().text_size(11).text_color(t.dim).child(M.machineOf(p) ? `${M.machineOf(p)}: ${p.path}` : p.path))));
 
     const lines = [];
     if (!compact && s.show_description && M.shown(p, "description", s) && p.description) {
@@ -1039,7 +1223,7 @@ export default class ProjectTiles extends View {
           .child(h_flex().id(`pt-br-${p.id}`).min_w(0).flex_shrink(1).px(7).h(18).rounded(9).bg(t.raised).items_center()
             .when(Boolean(branchUrl), (el) => el.cursor_pointer().hover((st) => st.bg(t.hover))
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-              .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(branchUrl); }))
+              .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(cx, branchUrl); }))
             .child(div().truncate().text_size(11.5).font_medium().text_color(t.foreground).child(g.branch)))
           .when(g.dirty > 0, (el) => el.child(div().id(`pt-dirty-${p.id}`).flex_none().px(4).rounded(4).text_size(11).text_color(t.working)
             .when(this.hasGitview, (d2) => d2.cursor_pointer().hover((st) => st.bg(t.hover))
@@ -1064,7 +1248,7 @@ export default class ProjectTiles extends View {
             .child(div().id(`pt-c-${p.id}`).flex_none().text_size(11.5).text_color(t.ansi4)
               .when(Boolean(links.commit), (el) => el.cursor_pointer().hover((st) => st.underline())
                 .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(links.commit); }))
+                .on_click((_e, cx) => { cx.stop_propagation(); this.openUrl(cx, links.commit); }))
               .child(c.hash))
             .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(c.subject))
             .child(div().flex_none().text_size(11).text_color(t.dim).child(M.ago(c.date))));
