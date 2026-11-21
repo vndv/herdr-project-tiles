@@ -99,7 +99,7 @@ It is a port of [Project Tiles for VS Code](https://github.com/InvisibleF0x/proj
 - `mods/project-tiles/`:
   - `mod.json`: `place: "none"`, `focusable: true`, overlay dialog 0.92 × 0.9.
   - `main.js`: the view, the catalog edits and the calls below.
-  - `model.js`: pure logic with node tests in the repo (`test.mjs`): rows, navigation, presence,
+  - `model.js`: pure logic, kept free of Herdr calls so node tests can import it: rows, navigation, presence,
     colours, git pills; git argv and output parsing, web links, the language table (extension →
     linguist colour) and shares, availability, the refresh TTLs, the cache format, the import
     merge, a 6-slot task pool. Code that runs programs takes a `run(argv, {cwd, timeout})`
@@ -113,8 +113,8 @@ It is a port of [Project Tiles for VS Code](https://github.com/InvisibleF0x/proj
     (`worktree`, `gitview-tab`).
 - **Programs**, all through `/usr/bin/env GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C`:
   - `git` read-only for the tile, with `--no-optional-locks -c core.fsmonitor=false
-    -c core.hooksPath=/dev/null -c core.quotepath=off`: `rev-parse --show-prefix` (the folder is
-    a repo root), `symbolic-ref`, `log -1`, `@{upstream}`, `rev-list --left-right --count`,
+    -c core.hooksPath=/dev/null -c core.quotepath=off`: `rev-parse --is-inside-work-tree --show-prefix`
+    (the folder is a work tree root, not a bare repo or a subfolder), `symbolic-ref`, `log -1`, `@{upstream}`, `rev-list --left-right --count`,
     `status --porcelain`, `config branch.<b>.remote`, `remote get-url`,
     `worktree list --porcelain -z` (line format on git < 2.36),
     `ls-files -z --format=%(objectmode) %(objectsize)%x09%(path)` for languages (git ≥ 2.38);
@@ -183,7 +183,7 @@ It is a port of [Project Tiles for VS Code](https://github.com/InvisibleF0x/proj
 
 ## Done when
 
-- `node test.mjs` passes and `herdr-app check mods/project-tiles` passes; `cmd-alt-p` opens the
+- `model.js`'s node tests pass and `herdr-app check mods/project-tiles` passes; `cmd-alt-p` opens the
   dialog with your projects grouped by collection.
 - Each git tile fills with branch, changed files and the last commit within a second or two; the
   cache file appears in `~/.config/herdr-app/data/project-tiles/`.

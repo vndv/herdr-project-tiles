@@ -1,11 +1,11 @@
-// node herdr-app/test.mjs — tests for the mod's pure logic.
+// node test/model.test.mjs — tests for the mod's pure logic.
 import assert from "node:assert/strict";
 // Herdr's runtime has none of these: model.js must not need them.
 for (const g of ["TextEncoder", "TextDecoder", "Buffer", "setTimeout", "setInterval", "structuredClone"]) {
   globalThis[`__${g}`] = globalThis[g];
   delete globalThis[g];
 }
-const m = await import("./mods/project-tiles/model.js");
+const m = await import("../herdr-app/mods/project-tiles/model.js");
 
 const t = async (name, fn) => {
   try {

@@ -54,7 +54,7 @@ these commands run on that machine.
 ## Development
 
     npm ci
-    npm run ci            # static checks + herdr-app/test.mjs
+    npm run ci            # static checks + test/model.test.mjs
     herdr-app check herdr-app/mods/project-tiles
 
 `model.js` holds the logic and has no Herdr imports, so tests run it under Node against temp git

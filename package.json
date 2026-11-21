@@ -15,7 +15,7 @@
   },
   "scripts": {
     "check": "node scripts/check.mjs",
-    "test": "node herdr-app/test.mjs",
+    "test": "node test/model.test.mjs",
     "ci": "npm run check && npm test",
     "package": "node scripts/package.mjs",
     "version-packages": "changeset version"
