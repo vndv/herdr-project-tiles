@@ -52,6 +52,7 @@ jobs:
     needs: [test, skylos]
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -88,5 +89,8 @@ jobs:
             --body "Automated Skylos badge update." \
             --base main \
             --head "$BRANCH" || true
+
+          # PRs opened with GITHUB_TOKEN start no workflows: run CI so the required checks report.
+          gh workflow run ci.yml --ref "$BRANCH"
 
           echo "Opened PR for Skylos badge update from branch $BRANCH"
