@@ -1,0 +1,19 @@
+# Settings for Skylos (static analysis, CI). Quality findings are reported in the grade badge;
+# the gate fails on critical and security findings.
+[tool.skylos]
+complexity = 10
+nesting = 3
+max_args = 5
+max_lines = 50
+ignore = []
+exclude = ["package-lock.json", "node_modules"]
+
+[tool.skylos.languages.typescript]
+complexity = 15
+nesting = 4
+
+[tool.skylos.gate]
+fail_on_critical = true
+max_security = 0
+max_quality = 100
+strict = false

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Herdr.app runs on macOS; the backend (git, perl, sh, find) also runs on Linux machines.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+      - run: git --version && perl -v | head -2
+      - run: npm ci --ignore-scripts
+      - run: npm run ci
+      - run: npm run package
+
+  skylos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      # Newer Skylos releases replace the grade output required by the badge script.
+      - run: pip install skylos==4.22.1
+      - run: skylos . -a --format json --output skylos-results.json
+      - run: skylos . --gate
+      - run: node scripts/update-skylos-badge.mjs skylos-results.json
+
+  skylos-badge:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, skylos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      # Keep aligned with the grade-compatible version in the skylos job.
+      - run: pip install skylos==4.22.1
+      - run: skylos . -a --format json --output skylos-results.json
+      - run: node scripts/update-skylos-badge.mjs skylos-results.json
+      - name: Create or update PR for Skylos badge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- .github/badges/skylos.json; then
+            echo "Skylos badge already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="chore/update-skylos-badge-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git add .github/badges/skylos.json
+          git commit -m "docs: update Skylos badge"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "docs: update Skylos badge" \
+            --body "Automated Skylos badge update." \
+            --base main \
+            --head "$BRANCH" || true
+
+          echo "Opened PR for Skylos badge update from branch $BRANCH"

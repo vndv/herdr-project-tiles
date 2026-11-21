@@ -1,5 +1,8 @@
 # Project Tiles for Herdr.app
 
+[![CI](https://github.com/vndv/herdr-project-tiles/actions/workflows/ci.yml/badge.svg)](https://github.com/vndv/herdr-project-tiles/actions/workflows/ci.yml)
+[![Skylos Grade](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/vndv/herdr-project-tiles/main/.github/badges/skylos.json)](https://github.com/duriantaco/skylos)
+
 A tile dashboard of projects for [Herdr.app](https://herdr.dev), the desktop app for terminals
 and coding agents, modelled on [InvisibleF0x/project-tiles](https://github.com/InvisibleF0x/project-tiles)
 for VS Code. It is a mod in `herdr-app/mods/project-tiles/`, listed in the
@@ -78,16 +81,36 @@ folder, all on this computer. A project with a `"machine"` field (a herdr-core m
 
 ## Development
 
-    node herdr-app/test.mjs                    # model.js: pure logic, plus git against temp repos
+    npm ci
+    npm run ci                                 # static checks + node herdr-app/test.mjs
     herdr-app check herdr-app/mods/project-tiles
 
-`model.js` has no Herdr imports: everything that runs a program takes a `run(argv, {cwd,
-timeout})` function, which `main.js` maps to Herdr's `exec` and the tests to `child_process`.
-Tests never touch the network and ignore your own git config (`GIT_CONFIG_GLOBAL=/dev/null`,
-only `file://` remotes).
+`npm run check` checks the mod's syntax and JSON files, its icons, and that no personal paths are
+committed; `npm test` runs `herdr-app/test.mjs`: model.js's pure logic, plus git against temp
+repositories. `model.js` has no Herdr imports: everything that runs a program takes a
+`run(argv, {cwd, timeout})` function, which `main.js` maps to Herdr's `exec` and the tests to
+`child_process`. Tests never touch the network and ignore your own git config
+(`GIT_CONFIG_GLOBAL=/dev/null`, only `file://` remotes). `pre-commit install` runs `npm run ci`
+before each commit.
+
+CI (`.github/workflows/ci.yml`) runs `npm run ci` on Linux and macOS, builds the release zip, and
+runs [Skylos](https://github.com/duriantaco/skylos): the gate fails on critical and security
+findings, the grade goes to the badge (updated by a bot PR from `main`).
 
 Earlier versions shipped a Rust binary that also served the herdr TUI as a plugin; it is in the
 git history (last at `2bdad21`).
+
+## Releases
+
+Releases use [Changesets](https://github.com/changesets/changesets). Add a changeset for every
+user-facing change:
+
+    npx changeset
+
+On `main`, the release workflow opens a "chore: version packages" PR that bumps `package.json`
+and writes `CHANGELOG.md`. Merging it tags `v<version>` and creates the GitHub release with the
+mod folder as `project-tiles-<version>.zip` (`npm run package` builds it locally into `dist/`).
+Nothing is published to npm.
 
 ## License
 

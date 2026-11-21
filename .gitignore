@@ -1,6 +1,10 @@
 /target/
 __pycache__/
 *.tmp*
+node_modules/
+.skylos/
+skylos-results.json
+dist/
 # written by `herdr-app check`
 herdr-app/mods/*/gpui-kit.d.ts
 herdr-app/mods/*/jsconfig.json
